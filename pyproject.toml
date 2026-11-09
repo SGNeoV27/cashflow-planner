@@ -3,10 +3,13 @@ name = "cashflow-planner"
 version = "0.1.0"
 description = "Lifetime cashflow forecasting engine for UK financial planning"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["pypdf>=4", "cryptography>=42"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.setuptools]
+packages = ["cashflow_engine", "fact_find_import", "client_store"]
