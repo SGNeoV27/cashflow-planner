@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import sys
 from datetime import date
 from enum import Enum
 from typing import Any, get_args, get_origin, get_type_hints
@@ -39,13 +40,22 @@ def _decode(tp: Any, value: Any) -> Any:
         return _decode(args[0], value)
     if isinstance(tp, type):
         if dataclasses.is_dataclass(tp):
-            hints = get_type_hints(tp, vars(models))
+            hints = get_type_hints(tp, vars(sys.modules[tp.__module__]))
             return tp(**{k: _decode(hints[k], v) for k, v in value.items() if k in hints})
         if issubclass(tp, Enum):
             return tp(value)
         if tp is date:
             return date.fromisoformat(value)
     return value
+
+
+def to_dict(obj: Any) -> Any:
+    """Any dataclass (plan, fact find, forecast) as JSON-ready data."""
+    return _encode(obj)
+
+
+def from_dict(tp: Any, data: Any) -> Any:
+    return _decode(tp, data)
 
 
 def plan_to_dict(plan: models.Plan) -> dict:

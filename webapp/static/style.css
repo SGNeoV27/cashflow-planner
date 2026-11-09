@@ -1,0 +1,58 @@
+:root {
+  --bg: #f6f7f9; --panel: #fff; --ink: #1d2733; --muted: #5b6776; --line: #dde2e8;
+  --accent: #1f5f8b; --accent-ink: #fff; --warn-bg: #fff6e0; --warn: #8a5a00; --bad: #b3261e; --good: #1e7a46;
+}
+* { box-sizing: border-box; }
+body { margin: 0; font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--ink); }
+header { display: flex; align-items: center; gap: 24px; padding: 10px 24px; background: var(--panel); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 5; }
+.brand { font-weight: 700; color: var(--accent); text-decoration: none; font-size: 16px; }
+nav { display: flex; gap: 16px; flex: 1; }
+nav a { color: var(--muted); text-decoration: none; }
+nav a.on { color: var(--ink); font-weight: 600; }
+main { max-width: 1280px; margin: 0 auto; padding: 20px 24px 60px; }
+footer { text-align: center; color: var(--muted); font-size: 12px; padding: 16px; }
+h1 { font-size: 22px; margin: 4px 0 16px; }
+h2 { font-size: 16px; margin: 0 0 10px; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+.grid2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+.layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+.sticky { position: sticky; top: 64px; }
+@media (max-width: 1000px) { .layout, .grid2 { grid-template-columns: 1fr; } .sticky { position: static; } }
+label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 2px; }
+input, select, textarea { font: inherit; padding: 5px 7px; border: 1px solid var(--line); border-radius: 5px; width: 100%; background: #fff; color: var(--ink); }
+input[type=checkbox] { width: auto; }
+input[type=range] { padding: 0; }
+.row { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; }
+.row > div { flex: 1; min-width: 120px; }
+button { font: inherit; padding: 6px 12px; border-radius: 5px; border: 1px solid var(--accent); background: var(--accent); color: var(--accent-ink); cursor: pointer; }
+button.ghost { background: transparent; color: var(--accent); }
+button.small { padding: 2px 8px; font-size: 12px; }
+button.danger { border-color: var(--bad); color: var(--bad); background: transparent; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+th { color: var(--muted); font-weight: 600; font-size: 12px; white-space: nowrap; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.edit td { padding: 2px 3px; }
+.edit input, .edit select { padding: 3px 5px; }
+.scroll { overflow-x: auto; }
+.years { max-height: 420px; overflow: auto; }
+.years tr.sel { background: #e8f1f8; }
+.years tr { cursor: pointer; }
+.neg { color: var(--bad); }
+.warn { background: var(--warn-bg); color: var(--warn); border-radius: 6px; padding: 8px 12px; margin-bottom: 12px; }
+.warn ul { margin: 4px 0 0 18px; padding: 0; }
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 12px; }
+.kpi { background: var(--bg); border-radius: 6px; padding: 8px 10px; }
+.kpi b { display: block; font-size: 18px; font-variant-numeric: tabular-nums; }
+.kpi span { color: var(--muted); font-size: 12px; }
+.muted { color: var(--muted); }
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin-bottom: 12px; flex-wrap: wrap; }
+.tabs button { background: transparent; color: var(--muted); border: none; border-bottom: 2px solid transparent; border-radius: 0; }
+.tabs button.on { color: var(--ink); border-bottom-color: var(--accent); font-weight: 600; }
+.order li { display: flex; gap: 8px; align-items: center; padding: 3px 0; }
+.chart { position: relative; height: 300px; }
+.detail td { font-variant-numeric: tabular-nums; }
+.center { max-width: 420px; margin: 60px auto; }
+.list a { color: var(--accent); text-decoration: none; font-weight: 600; }
+.edit input[data-c=name] { min-width: 170px; }
+.edit select { min-width: 110px; }

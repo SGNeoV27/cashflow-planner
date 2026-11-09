@@ -88,7 +88,8 @@ class ClientStore:
     def __init__(self, path: str | Path, passphrase: str):
         self.path = Path(path)
         new = not self.path.exists()
-        self.db = sqlite3.connect(self.path)
+        # The local web app serves requests from a thread pool; sqlite is built thread-safe.
+        self.db = sqlite3.connect(self.path, check_same_thread=False)
         self.db.executescript(SCHEMA)
         if new:
             os.chmod(self.path, 0o600)

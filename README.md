@@ -1,12 +1,56 @@
 # Cashflow Planner
 
 A lifetime cashflow forecasting tool for UK financial planning, built for
-Footes Financial Planning UK. It is in early development. This first part is the
-**calculation engine**. It has no user interface and can be tested on its own.
+Footes Financial Planning UK. It is in early development.
+
+The code is in four separate parts, so the calculations can be tested on
+their own:
+
+| Part | What it does |
+|---|---|
+| `cashflow_engine` | The forecast calculations. It has no user interface. |
+| `fact_find_import` | Reads CashCalc fact-find PDFs into a draft plan. |
+| `client_store` | Encrypted client records, with saved versions and an audit trail. |
+| `webapp` | The adviser's screens. It runs in the browser, on this computer only. |
+
+## Starting the app
+
+You need Python 3.11 or later. Install it once, from the project folder:
+
+```bash
+python -m pip install -e .
+```
+
+Then start the app each time with:
+
+```bash
+python -m webapp
+```
+
+The app opens at http://127.0.0.1:8765. The first time, you choose a
+passphrase. It encrypts every client record. Records are kept in
+`~/CashflowPlanner/clients.db`, which you can change with the `CASHFLOW_DB`
+environment variable. The app only accepts connections from this computer.
+Nothing about a client is sent anywhere.
+
+What the app does:
+- **Import a fact find:** upload a CashCalc PDF, then check what was read and
+  fill in anything that was missing, such as the date of birth. You also set
+  the starting growth and charge assumptions.
+- **Edit a plan:** change pots, income, expenditure, contributions, planned
+  withdrawals, one-off charges and the withdrawal order. The forecast,
+  charts and year-by-year table update as you type. Sliders change inflation
+  and all growth rates. Click a year to see each pot's figures for that year.
+- **Scenarios:** save any edited plan as a named scenario. There are also
+  one-click scenarios for care costs, inflation at 4% and returns 2% lower.
+  A scenario never changes the baseline.
+- **Compare scenarios:** see every scenario's total savings on one chart.
+- **Audit trail:** every save is kept as a new version. Each entry records
+  what changed, your note, and the effect on savings at the end of the plan.
+
+## The calculation engine
 
 > Forecasts are illustrations based on assumptions, not guarantees.
-
-## What the engine does
 
 `cashflow_engine.project(plan)` turns a client plan into a year-by-year forecast
 in today's terms. Each year runs from one birthday to the next, and the first
@@ -69,5 +113,7 @@ and `*.db` files are git-ignored. Test cases use anonymised figures only.
 - Monthly calculation steps. The engine is annual for now, which matches
   Voyant's year-by-year table.
 - Returns that vary year to year, such as a fund's model returns.
-- Client records, input screens and fact-find import (step 2).
+- Reading Intelligent Office fact finds.
+- Changes to the baseline aren't carried into existing scenarios. Each
+  scenario is a separate copy.
 - PDF and Excel reports (step 3).
