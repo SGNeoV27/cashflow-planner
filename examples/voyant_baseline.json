@@ -1,0 +1,258 @@
+{
+  "client": {
+    "name": "Test Client A",
+    "date_of_birth": "1965-01-07",
+    "retirement_age": 60,
+    "state_pension_age": null,
+    "life_expectancy": null
+  },
+  "start_date": "2021-10-19",
+  "pots": [
+    {
+      "id": "current",
+      "name": "Current account",
+      "type": "current_account",
+      "value": 0,
+      "growth_rate": 0.005,
+      "charge_rate": 0.0,
+      "tax_rate": 0.0,
+      "owner": null
+    },
+    {
+      "id": "pp1",
+      "name": "Personal pension 1",
+      "type": "pension",
+      "value": 120000,
+      "growth_rate": 0.05,
+      "charge_rate": 0.01,
+      "tax_rate": 0.2,
+      "owner": null
+    },
+    {
+      "id": "pp2",
+      "name": "Personal pension 2",
+      "type": "pension",
+      "value": 79000,
+      "growth_rate": 0.05,
+      "charge_rate": 0.01,
+      "tax_rate": 0.2,
+      "owner": null
+    },
+    {
+      "id": "wp1",
+      "name": "Workplace pension",
+      "type": "pension",
+      "value": 8300,
+      "growth_rate": 0.05,
+      "charge_rate": 0.01,
+      "tax_rate": 0.2,
+      "owner": null
+    },
+    {
+      "id": "pp3",
+      "name": "Personal pension 3",
+      "type": "pension",
+      "value": 69000,
+      "growth_rate": 0.05,
+      "charge_rate": 0.01,
+      "tax_rate": 0.2,
+      "owner": null
+    },
+    {
+      "id": "isa",
+      "name": "ISA",
+      "type": "isa",
+      "value": 100000,
+      "growth_rate": 0.01,
+      "charge_rate": 0.0,
+      "tax_rate": 0.0,
+      "owner": null
+    }
+  ],
+  "incomes": [],
+  "expenses": [
+    {
+      "name": "Food / Housekeeping",
+      "amount": 150,
+      "frequency": "monthly",
+      "start_age": 56,
+      "end_age": 100,
+      "inflation": null,
+      "category": null
+    },
+    {
+      "name": "Council Tax",
+      "amount": 1036,
+      "frequency": "annual",
+      "start_age": 56,
+      "end_age": 100,
+      "inflation": null,
+      "category": null
+    },
+    {
+      "name": "Fuel",
+      "amount": 60,
+      "frequency": "monthly",
+      "start_age": 56,
+      "end_age": 100,
+      "inflation": null,
+      "category": null
+    },
+    {
+      "name": "Holidays",
+      "amount": 50,
+      "frequency": "monthly",
+      "start_age": 56,
+      "end_age": 100,
+      "inflation": null,
+      "category": null
+    },
+    {
+      "name": "Socialising / Entertainment",
+      "amount": 50,
+      "frequency": "monthly",
+      "start_age": 56,
+      "end_age": 100,
+      "inflation": null,
+      "category": null
+    },
+    {
+      "name": "Motoring Insurance",
+      "amount": 540,
+      "frequency": "annual",
+      "start_age": 56,
+      "end_age": 100,
+      "inflation": null,
+      "category": null
+    },
+    {
+      "name": "Motoring Maintenance",
+      "amount": 510,
+      "frequency": "annual",
+      "start_age": 56,
+      "end_age": 100,
+      "inflation": null,
+      "category": null
+    },
+    {
+      "name": "Broadband / Landline / TV",
+      "amount": 41,
+      "frequency": "monthly",
+      "start_age": 56,
+      "end_age": 100,
+      "inflation": null,
+      "category": null
+    },
+    {
+      "name": "Birthdays / Christmas",
+      "amount": 41,
+      "frequency": "monthly",
+      "start_age": 56,
+      "end_age": 100,
+      "inflation": null,
+      "category": null
+    },
+    {
+      "name": "Gas",
+      "amount": 35,
+      "frequency": "monthly",
+      "start_age": 56,
+      "end_age": 100,
+      "inflation": null,
+      "category": null
+    },
+    {
+      "name": "Electricity",
+      "amount": 35,
+      "frequency": "monthly",
+      "start_age": 56,
+      "end_age": 100,
+      "inflation": null,
+      "category": null
+    },
+    {
+      "name": "Other expenses",
+      "amount": 28,
+      "frequency": "monthly",
+      "start_age": 56,
+      "end_age": 100,
+      "inflation": null,
+      "category": null
+    },
+    {
+      "name": "Dental",
+      "amount": 17,
+      "frequency": "monthly",
+      "start_age": 56,
+      "end_age": 100,
+      "inflation": null,
+      "category": null
+    },
+    {
+      "name": "Insurance",
+      "amount": 170,
+      "frequency": "annual",
+      "start_age": 56,
+      "end_age": 100,
+      "inflation": null,
+      "category": null
+    },
+    {
+      "name": "TV Licence",
+      "amount": 158,
+      "frequency": "annual",
+      "start_age": 56,
+      "end_age": 100,
+      "inflation": null,
+      "category": null
+    },
+    {
+      "name": "Motoring Tax",
+      "amount": 145,
+      "frequency": "annual",
+      "start_age": 56,
+      "end_age": 100,
+      "inflation": null,
+      "category": null
+    },
+    {
+      "name": "Water",
+      "amount": 122,
+      "frequency": "annual",
+      "start_age": 56,
+      "end_age": 100,
+      "inflation": null,
+      "category": null
+    },
+    {
+      "name": "Security",
+      "amount": 9,
+      "frequency": "monthly",
+      "start_age": 56,
+      "end_age": 100,
+      "inflation": null,
+      "category": null
+    }
+  ],
+  "contributions": [],
+  "withdrawals": [],
+  "one_off_charges": [],
+  "withdrawal_order": [
+    "current",
+    "pp1",
+    "pp2",
+    "wp1",
+    "pp3",
+    "isa"
+  ],
+  "assumptions": {
+    "inflation": 0.02,
+    "end_age": 100,
+    "surplus_to_save": 0.0,
+    "surplus_pot_id": null,
+    "overdraft_rate": 0.0,
+    "real_rate_method": "additive"
+  },
+  "partner": null,
+  "name": "Current situation"
+}
