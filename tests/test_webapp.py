@@ -75,3 +75,24 @@ def test_settings_edit_and_reset(client):
     del d["atr_table"]["10"]
     assert client.post("/api/settings", json={"defaults": d}).status_code == 400
     assert client.post("/api/settings/reset", json={}).json()["inflation"] == 0.02
+
+
+def test_report_downloads(client):
+    client.post("/api/unlock", json={"passphrase": "a good passphrase"})
+    ff = to_dict(parse_cashcalc(SAMPLE.read_text()))
+    cid = client.post("/api/import/confirm", json={
+        "fact_find": ff, "atr": 5, "date_of_birth": "1965-01-07", "start_date": "2021-10-19"}).json()["id"]
+    plan = client.get(f"/api/clients/{cid}/plans/Baseline").json()["plan"]
+    scenario = dict(plan, name="Inflation 4%", assumptions=dict(plan["assumptions"], inflation=0.04))
+    client.post(f"/api/clients/{cid}/plans", json={"plan": scenario, "note": "test"})
+    pdf = client.post("/api/report/pdf", json={"plan": plan, "client_id": cid})
+    assert pdf.status_code == 200, pdf.text
+    assert pdf.content[:5] == b"%PDF-"
+    assert "attachment" in pdf.headers["content-disposition"]
+    xlsx = client.post("/api/report/xlsx", json={"plan": plan, "client_id": cid})
+    assert xlsx.status_code == 200 and xlsx.content[:2] == b"PK"
+    from io import BytesIO
+    from openpyxl import load_workbook
+    wb = load_workbook(BytesIO(xlsx.content))
+    assert [c.value for c in wb["Scenarios"]["A"]][3:5] == ["Baseline", "Inflation 4%"]
+    assert client.post("/api/report/doc", json={"plan": plan}).status_code == 404

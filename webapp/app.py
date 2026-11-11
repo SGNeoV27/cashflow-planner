@@ -13,7 +13,7 @@ from datetime import date
 from pathlib import Path
 
 from fastapi import Body, FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from cashflow_engine import FirmDefaults, project
@@ -23,6 +23,7 @@ from fact_find_import import read_fact_find
 from fact_find_import.factfind import FactFind
 from fact_find_import.reader import UnknownFormat
 from fact_find_import.to_plan import to_plan
+from reporting import build, render_pdf, render_xlsx
 
 STATIC = Path(__file__).parent / "static"
 DEFAULT_DB = Path(os.environ.get("CASHFLOW_DB", Path.home() / "CashflowPlanner" / "clients.db"))
@@ -187,6 +188,34 @@ def run_forecast(plan: dict = Body(...)):
 
 
 # -- fact-find import ---------------------------------------------------------
+REPORT_TYPES = {
+    "pdf": (render_pdf, "application/pdf"),
+    "xlsx": (render_xlsx, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+}
+
+
+@app.post("/api/report/{fmt}")
+def report(fmt: str, body: dict = Body(...)):
+    """The PDF report or Excel export for the plan on screen. With a client id,
+    the client's other saved plans are included as scenarios to compare."""
+    if fmt not in REPORT_TYPES:
+        raise HTTPException(404, "Unknown report type")
+    try:
+        plan = plan_from_dict(body["plan"])
+    except Exception as e:  # noqa: BLE001 - shown to the adviser
+        raise HTTPException(400, f"Plan is not valid: {e}")
+    others = []
+    cid = body.get("client_id")
+    if cid:
+        s = store()
+        others = [s.load_plan(cid, n) for n in s.plan_names(cid) if n != plan.name]
+    render, mime = REPORT_TYPES[fmt]
+    content = render(build(plan, others))
+    safe = "".join(ch for ch in f"{plan.client.name} {plan.name}" if ch.isalnum() or ch in " -_").strip()
+    filename = f"Forecast - {safe or 'client'} - {date.today():%Y-%m-%d}.{fmt}"
+    return Response(content, media_type=mime, headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
 @app.post("/api/import")
 async def import_pdf(file: UploadFile = File(...)):
     store()  # must be unlocked

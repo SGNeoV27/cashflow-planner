@@ -288,6 +288,10 @@ async function planView(cid, name) {
           <div style="margin-top:8px"><label>All growth rates: <b id="gOut">±0%</b> (what-if: included in whatever you save next)</label>
           <input type="range" id="gAdj" min="-4" max="4" step="0.25" value="0"></div>
         </div>
+        <div class="panel"><h2>Report</h2><div class="row">
+          <div style="flex:3"><p class="muted" style="margin:0">The branded PDF report and the Excel export show the forecast exactly as it is on screen, with this client's other saved forecasts as scenarios to compare.</p></div>
+          <div><button id="pdfBtn">Download PDF report</button></div>
+          <div><button class="ghost" id="xlsxBtn">Download Excel</button></div></div></div>
         <div class="panel"><h2>Save</h2><div class="row">
           <div style="flex:3"><label>Note for the audit trail</label><input id="note" placeholder="What changed and why"></div>
           <div><button id="save">Save ${esc(name)}</button></div></div>
@@ -523,6 +527,25 @@ async function planView(cid, name) {
   document.getElementById("save").onclick = async () => {
     try { const p = effectivePlan(); p.name = name; await saveAs(p, document.getElementById("note").value); location.reload(); } catch (e) { msg(e.message); }
   };
+  async function download(fmt) {
+    try {
+      msg("Preparing the " + (fmt === "pdf" ? "PDF report" : "Excel export") + "…");
+      const p = effectivePlan(); p.name = name;
+      const res = await fetch(`/api/report/${fmt}`, { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ plan: p, client_id: cid }) });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.statusText);
+      const blob = await res.blob();
+      const cd = res.headers.get("Content-Disposition") || "";
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = (cd.match(/filename="([^"]+)"/) || [])[1] || `forecast.${fmt}`;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+      msg("");
+    } catch (e) { msg(e.message); }
+  }
+  document.getElementById("pdfBtn").onclick = () => download("pdf");
+  document.getElementById("xlsxBtn").onclick = () => download("xlsx");
   document.getElementById("saveAs").onclick = async () => {
     const n = document.getElementById("scName").value.trim();
     if (!n) return msg("Give the scenario a name");
