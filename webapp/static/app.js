@@ -10,6 +10,26 @@ const POT_LABELS = { current_account: "Current account", cash: "Cash", isa: "ISA
 const FREQS = ["weekly", "monthly", "quarterly", "annual", "one_off"];
 const COLOURS = ["#1f5f8b", "#3d9970", "#e0a030", "#8e5ea2", "#c0504d", "#4bacc6", "#7f7f7f", "#9bbb59"];
 
+const INCOME_KINDS = ["employment", "self_employment", "state_pension", "db_pension", "rental", "investment", "other"];
+const EVENT_KINDS = ["property_purchase", "home_improvements", "vehicle", "gift", "care", "healthcare", "other"];
+const CHARGE_KINDS = { fmc: "Fund management (FMC/OCF)", platform: "Platform", dfm: "DFM", adviser: "Adviser", other: "Other ongoing", fixed: "Fixed annual fee" };
+const METHODS = { ufpls: "UFPLS (25% tax-free)", drawdown: "Drawdown (taxable)", tax_free_cash: "Tax-free cash only" };
+const label = (v) => String(v ?? "").replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
+function atrOptions(d, sel, scenario) {
+  return Array.from({ length: 10 }, (_, i) => i + 1).map((k) => { const r = d.atr_table[k];
+    return `<option value="${k}" ${+sel === k ? "selected" : ""}>${k} ${esc(r?.label || "")} (${pct(r?.[scenario || "central"])}%)</option>`; }).join("");
+}
+// Mirrors FirmDefaults.growth_for in the engine.
+function growthFor(d, pot, scenario) {
+  if (pot.product && pot.product in d.product_returns) return d.product_returns[pot.product];
+  if (pot.portfolio) { const p = d.portfolios.find((x) => x.name === pot.portfolio); if (p) return d.atr_table[p.atr]?.[scenario || "central"]; }
+  if (pot.type === "current_account") return d.current_account_return;
+  if (pot.type === "cash") return d.cash_return;
+  return d.atr_table[pot.atr ?? d.default_atr]?.[scenario || "central"];
+}
+const potCharges = (p) => (p.charges?.length ? p.charges.reduce((a, c) => a + (c.rate || 0), 0) : p.charge_rate || 0);
+let SETTINGS = null;
+
 async function api(path, opts = {}) {
   const init = { method: opts.method || (opts.body ? "POST" : "GET"), headers: {} };
   if (opts.body instanceof FormData) init.body = opts.body;
@@ -38,6 +58,7 @@ async function route() {
     if (parts[0] === "client" && parts[2] === "audit") return auditView(parts[1]);
     if (parts[0] === "client") return planView(parts[1], parts[3] || "Baseline");
     if (parts[0] === "review") return reviewView();
+    if (parts[0] === "settings") return settingsView();
     return clientsView();
   } catch (e) { $app.innerHTML = `<div class="warn">${esc(e.message)}</div>`; }
 }
@@ -67,7 +88,7 @@ function unlockView(st) {
 
 // ---------------------------------------------------------------- clients
 async function clientsView() {
-  nav([["#/clients", "Clients", true]]);
+  nav([["#/clients", "Clients", true], ["#/settings", "Default assumptions", false]]);
   const clients = await api("/api/clients");
   $app.innerHTML = `<h1>Clients</h1>
   <div class="grid2">
@@ -125,14 +146,13 @@ function reviewView() {
       ${ff.objectives.length ? `<h2>Objectives</h2>${ff.objectives.map((o) => `<p>${esc(o)}</p>`).join("")}` : ""}
     </div>
     <div class="panel"><h2>Starting assumptions</h2>
-      <p class="muted">The fact find has no growth or charge assumptions. These apply to every imported pot, and you can change each pot afterwards.</p>
-      <div class="row"><div><label>Inflation %</label><input type="number" step="0.01" id="d_infl" value="${pct(d.inflation)}"></div>
+      <p class="muted">These come from your <a href="#/settings">default assumptions</a>. They apply to every imported pot, and you can change any pot afterwards.</p>
+      <div class="row"><div><label>Attitude to risk</label><select id="d_atr">${atrOptions(d, d.default_atr)}</select></div>
+      <div><label>Inflation %</label><input type="number" step="0.01" id="d_infl" value="${pct(d.inflation)}"></div>
       <div><label>Plan to age</label><input type="number" id="d_end" value="${d.end_age}"></div></div>
-      <table class="edit"><tr><th>Type</th><th>Growth %</th><th>Charges %</th><th>Withdrawal tax %</th></tr>
-      ${["pension", "isa", "gia", "cash", "other"].map((k) => `<tr><td>${POT_LABELS[k]}</td>
-        <td><input type="number" step="0.01" data-g="${k}" value="${pct(d.growth[k] ?? 0)}"></td>
-        <td><input type="number" step="0.01" data-c="${k}" value="${pct(d.charges[k] ?? 0)}"></td>
-        <td><input type="number" step="0.01" data-t="${k}" value="${pct(d.tax[k] ?? 0)}"></td></tr>`).join("")}</table></div>
+      <p class="muted" style="font-size:12px">Invested pots grow at the ATR's assumed return. Cash grows at ${pct(d.cash_return)}%. ${Object.entries(d.product_returns).map(([n, r]) => `${esc(n)} grow at ${pct(r)}%.`).join(" ")}</p>
+      <div class="row"><div><label>Return scenario</label><select id="d_sc">${["lower", "central", "upper"].map((x) => `<option ${x === d.return_scenario ? "selected" : ""} value="${x}">${label(x)}</option>`).join("")}</select></div></div>
+      <p class="muted" style="font-size:12px">Invested pots start with the default charges for their type (pensions ${pct((d.charges.pension || []).reduce((a, c) => a + c.rate, 0))}% a year). Pensions are taxed under ${d.pension_tax_mode === "uk" ? "UK income tax" : "a flat rate"}.</p></div>
   </div>
   <div class="grid2">
     <div class="panel"><h2>Pensions, savings and investments</h2><table>
@@ -153,9 +173,9 @@ function reviewView() {
     ff.clients[0].name = document.getElementById("r_name").value;
     const ret = document.getElementById("r_ret").value; ff.clients[0].retirement_age = ret ? +ret : null;
     const defaults = { ...d, inflation: +document.getElementById("d_infl").value / 100, end_age: +document.getElementById("d_end").value,
-      growth: { ...d.growth, ...num("data-g") }, charges: { ...d.charges, ...num("data-c") }, tax: { ...d.tax, ...num("data-t") } };
+      return_scenario: document.getElementById("d_sc").value };
     try {
-      const r = await api("/api/import/confirm", { body: { fact_find: ff, defaults,
+      const r = await api("/api/import/confirm", { body: { fact_find: ff, defaults, atr: +document.getElementById("d_atr").value,
         date_of_birth: document.getElementById("r_dob").value || null, start_date: document.getElementById("r_start").value } });
       sessionStorage.removeItem("review");
       location.hash = `#/client/${r.id}/plan/Baseline`;
@@ -166,17 +186,28 @@ function reviewView() {
 // ---------------------------------------------------------------- plan editor
 const ITEM_COLS = [
   ["name", "Description", "text"], ["amount", "Amount £", "num"], ["frequency", "Frequency", FREQS],
-  ["start_age", "From age", "int"], ["end_age", "To age", "int?"], ["inflation", "Inflation %", "pct?"], ["category", "Category", "text?"]];
+  ["start_age", "From age", "int"], ["end_age", "To age", "int?"], ["inflation", "Increase %", "pct?"], ["category", "Category", "text?"]];
+const DATE_COLS = [["start_date", "Or from date", "date?"], ["end_date", "To date", "date?"]];
 const SPECS = {
   pots: { title: "Pensions, savings and investments", cols: [["name", "Name", "text"], ["type", "Type", POT_TYPES], ["value", "Value £", "num"],
-    ["growth_rate", "Growth %", "pct"], ["charge_rate", "Charges %", "pct"], ["tax_rate", "Withdrawal tax %", "pct"]],
-    blank: () => ({ id: "pot" + Date.now().toString(36), name: "New pot", type: "isa", value: 0, growth_rate: 0.05, charge_rate: 0.0075, tax_rate: 0, owner: null }) },
-  incomes: { title: "Income", cols: ITEM_COLS, blank: (p) => ({ name: "Income", amount: 0, frequency: "annual", start_age: startAge(p), end_age: null, inflation: null, category: null }) },
+    ["atr", "ATR", "atr"], ["portfolio", "Portfolio", "portfolio"], ["product", "Fixed-rate product", "product"],
+    ["growth_rate", "Gross growth %", "growth"], ["_charges", "Charges", "charges"], ["_net", "Net growth %", "net"],
+    ["tax_mode", "Tax", { flat: "Flat rate", uk: "UK income tax" }], ["withdrawal_method", "Pension withdrawals", METHODS], ["tax_rate", "Flat tax %", "pct"]],
+    blank: () => ({ id: "pot" + Date.now().toString(36), name: "New pot", type: "isa", value: 0, growth_rate: growthFor(SETTINGS, { type: "isa" }), growth_custom: false,
+      atr: SETTINGS.default_atr, charge_rate: 0, charges: JSON.parse(JSON.stringify(SETTINGS.charges.isa || [])), tax_rate: 0, tax_mode: "flat", withdrawal_method: "ufpls", crystallised: 0, owner: null }) },
+  incomes: { title: "Income", cols: [...ITEM_COLS.slice(0, 6), ["kind", "Type", INCOME_KINDS], ["taxable", "Taxable (gross)", "bool"], ...DATE_COLS],
+    blank: (p) => ({ name: "Income", amount: 0, frequency: "annual", start_age: startAge(p), end_age: null, inflation: null, category: null, kind: "other", taxable: false }) },
   expenses: { title: "Expenditure", cols: ITEM_COLS, blank: (p) => ({ name: "Expense", amount: 0, frequency: "monthly", start_age: startAge(p), end_age: null, inflation: null, category: null }) },
   contributions: { title: "Contributions", cols: [...ITEM_COLS.slice(0, 6), ["pot_id", "Into", "pot"], ["external", "From outside plan", "bool"]],
     blank: (p) => ({ name: "Contribution", amount: 0, frequency: "monthly", start_age: startAge(p), end_age: p.client.retirement_age, inflation: null, category: null, pot_id: p.pots[0]?.id, external: false }) },
-  withdrawals: { title: "Planned withdrawals (net)", cols: [...ITEM_COLS.slice(0, 6), ["pot_id", "From", "pot"]],
-    blank: (p) => ({ name: "Withdrawal", amount: 0, frequency: "monthly", start_age: p.client.retirement_age || startAge(p), end_age: null, inflation: null, category: null, pot_id: p.pots.find((x) => x.type === "pension")?.id || p.pots[0]?.id }) },
+  withdrawals: { title: "Scheduled withdrawals", cols: [...ITEM_COLS.slice(0, 6), ["pot_id", "From", "pot"], ["basis", "Amount is", { net: "Net (after tax)", gross: "Gross (before tax)" }],
+    ["method", "Pension method", { "": "Pot's default", ...METHODS }], ...DATE_COLS],
+    blank: (p) => ({ name: "Retirement income", amount: 0, frequency: "monthly", start_age: p.client.retirement_age || startAge(p), end_age: null, inflation: null, category: null,
+      pot_id: p.pots.find((x) => x.type === "pension")?.id || p.pots[0]?.id, basis: "net", method: null }) },
+  events: { title: "Life events", cols: [["name", "Event", "text"], ["kind", "Type", EVENT_KINDS], ["amount", "Amount £", "num"],
+    ["frequency", "One-off or recurring", FREQS], ["start_age", "At / from age", "int"], ["end_age", "To age", "int?"], ["inflation", "Rises with inflation", "inflbool"],
+    ["pot_id", "Paid from", "pot?"], ["start_date", "Or on date", "date?"]],
+    blank: (p) => ({ name: "Event", kind: "other", amount: 0, frequency: "one_off", start_age: startAge(p) + 1, end_age: null, inflation: null, category: null, pot_id: null }) },
   one_off_charges: { title: "One-off charges", cols: [["name", "Description", "text"], ["pot_id", "From", "pot"], ["rate", "Rate %", "pct"], ["age", "At age", "int"]],
     blank: (p) => ({ name: "Initial advice fee", pot_id: p.pots[0]?.id, rate: 0.03, age: startAge(p) }) },
 };
@@ -193,10 +224,44 @@ function chart(id, cfg) { charts[id]?.destroy(); charts[id] = new Chart(document
 async function planView(cid, name) {
   const client = await api(`/api/clients/${cid}`);
   const { plan, versions } = await api(`/api/clients/${cid}/plans/${encodeURIComponent(name)}`);
+  SETTINGS = await api("/api/settings");
   nav([["#/clients", "Clients", false], [`#/client/${cid}/plan/Baseline`, client.name, true],
        [`#/client/${cid}/compare`, "Compare scenarios", false], [`#/client/${cid}/audit`, "Audit trail", false]]);
   let tab = "pots", selected = null, forecast = null, timer = null;
   const base = JSON.parse(JSON.stringify(plan));
+  let chargePot = null;
+  plan.events ||= [];
+  if (!plan.assumptions.atr_returns || !Object.keys(plan.assumptions.atr_returns).length)
+    plan.assumptions.atr_returns = Object.fromEntries(Object.entries(SETTINGS.atr_table).map(([k, v]) => [k, { ...v }]));
+  plan.assumptions.return_scenario ||= "central";
+  const grossOf = (pot) => (pot.atr != null && !pot.growth_custom && plan.assumptions.atr_returns[pot.atr])
+    ? plan.assumptions.atr_returns[pot.atr][plan.assumptions.return_scenario] : pot.growth_rate;
+  const HELP = {
+    pots: "Gross growth comes from the pot's ATR and the forecast's return scenario, unless you type your own rate (↺ goes back to the ATR rate). Net growth is gross growth less the % charges. Charges are taken from the pot's value each year. Pensions on UK income tax are taxed with the client's other income; UFPLS gives 25% tax-free.",
+    incomes: "Tick 'Taxable' for income entered before tax (employment, State Pension, DB pensions, rental): income tax is worked out for you. Leave unticked for amounts already net of tax. Increase blank = rises with inflation. An exact date overrides the age.",
+    expenses: "Increase blank = rises with inflation (keeps its value in today's terms). One-off items happen once, at the 'from' age.",
+    withdrawals: "Income taken from a pot on a schedule. 'Net' means the amount the client receives after tax: the gross withdrawal is worked out. To have pensions automatically top up spending instead (for example, less once the State Pension starts), leave this empty and put the pension in the withdrawal order.",
+    events: "Events are shown on the charts and in the report. 'Paid from' a pot takes the money straight from that pot; 'Cashflow' adds it to spending, funded in the withdrawal order. Untick 'Rises with inflation' for a fixed cash amount.",
+  };
+  function chargesEditor(pot) {
+    const ch = pot.charges?.length ? pot.charges : (pot.charge_rate ? [{ kind: "other", rate: pot.charge_rate, amount: 0, name: "Ongoing charges" }] : []);
+    pot.charges = ch; pot.charge_rate = 0;
+    return `<div class="panel" style="background:var(--bg)"><h2>Charges: ${esc(pot.name)}</h2>
+      <table class="edit"><tr><th>Charge</th><th>% of value a year</th><th>Fixed £ a year</th><th></th></tr>
+      ${ch.map((c, j) => `<tr><td><select data-ck="${j}">${Object.entries(CHARGE_KINDS).map(([k, l]) => `<option value="${k}" ${k === c.kind ? "selected" : ""}>${l}</option>`).join("")}</select></td>
+        <td><input type="number" step="0.01" data-cr="${j}" value="${pct(c.rate)}" style="width:90px"></td>
+        <td><input type="number" step="1" data-ca="${j}" value="${c.amount || 0}" style="width:90px"></td>
+        <td><button class="small danger" data-cd="${j}">✕</button></td></tr>`).join("")}</table>
+      <p><button class="small ghost" id="addCh">+ Add charge</button> <span class="muted">Total ${pct(potCharges(pot))}% a year${ch.some((c) => c.amount) ? " plus " + gbp(ch.reduce((a, c) => a + (c.amount || 0), 0)) + " fixed" : ""}. Gross ${pct(grossOf(pot))}% → net ${pct(grossOf(pot) - potCharges(pot))}%.</span></p></div>`;
+  }
+  function bindCharges(pot) {
+    const body = document.getElementById("tabBody");
+    body.querySelectorAll("[data-ck]").forEach((el) => (el.onchange = () => { pot.charges[+el.dataset.ck].kind = el.value; pot.charges[+el.dataset.ck].name = null; renderTab(); refresh(); }));
+    body.querySelectorAll("[data-cr]").forEach((el) => (el.onchange = () => { pot.charges[+el.dataset.cr].rate = +el.value / 100; renderTab(); refresh(); }));
+    body.querySelectorAll("[data-ca]").forEach((el) => (el.onchange = () => { pot.charges[+el.dataset.ca].amount = +el.value || 0; renderTab(); refresh(); }));
+    body.querySelectorAll("[data-cd]").forEach((el) => (el.onclick = () => { pot.charges.splice(+el.dataset.cd, 1); renderTab(); refresh(); }));
+    document.getElementById("addCh").onclick = () => { pot.charges.push({ kind: "other", rate: 0, amount: 0, name: null }); renderTab(); };
+  }
 
   $app.innerHTML = `<div class="row" style="align-items:center;margin-bottom:8px">
       <div style="flex:3"><h1 style="margin:0">${esc(client.name)}</h1></div>
@@ -210,6 +275,11 @@ async function planView(cid, name) {
           <div><label>Retirement age</label><input type="number" data-k="client.retirement_age" data-t="int?"></div>
           <div><label>Start date</label><input type="date" data-k="start_date"></div></div>
           <div class="row" style="margin-top:8px">
+          <div><label>State Pension age</label><input type="number" data-k="client.state_pension_age" data-t="int?"></div>
+          <div><label>Return scenario</label><select data-k="assumptions.return_scenario" data-t="text"><option value="lower">Lower</option><option value="central">Central</option><option value="upper">Upper</option></select></div>
+          <div><label><input type="checkbox" data-k="client.scottish_taxpayer" data-t="bool"> Scottish taxpayer</label>
+            <span class="muted" style="font-size:12px">Tax year ${esc(plan.assumptions.tax_rules?.tax_year || "")}</span></div></div>
+          <div class="row" style="margin-top:8px">
           <div><label>Inflation: <b id="inflOut"></b></label><input type="range" min="0" max="8" step="0.1" data-k="assumptions.inflation" data-t="pct"></div>
           <div><label>Plan to age</label><input type="number" data-k="assumptions.end_age" data-t="int"></div></div>
           <div class="row" style="margin-top:8px">
@@ -218,10 +288,10 @@ async function planView(cid, name) {
           <div style="margin-top:8px"><label>All growth rates: <b id="gOut">±0%</b> (what-if: included in whatever you save next)</label>
           <input type="range" id="gAdj" min="-4" max="4" step="0.25" value="0"></div>
         </div>
-        <div class="panel">
-          <div class="tabs">${Object.entries(SPECS).map(([k, s]) => `<button data-tab="${k}">${esc(s.title.split(" (")[0])}</button>`).join("")}<button data-tab="order">Withdrawal order</button></div>
-          <div id="tabBody" class="scroll"></div>
-        </div>
+        <div class="panel"><h2>Report</h2><div class="row">
+          <div style="flex:3"><p class="muted" style="margin:0">The branded PDF report and the Excel export show the forecast exactly as it is on screen, with this client's other saved forecasts as scenarios to compare.</p></div>
+          <div><button id="pdfBtn">Download PDF report</button></div>
+          <div><button class="ghost" id="xlsxBtn">Download Excel</button></div></div></div>
         <div class="panel"><h2>Save</h2><div class="row">
           <div style="flex:3"><label>Note for the audit trail</label><input id="note" placeholder="What changed and why"></div>
           <div><button id="save">Save ${esc(name)}</button></div></div>
@@ -231,7 +301,9 @@ async function planView(cid, name) {
           <p class="muted" style="margin-top:10px">Quick scenarios from this forecast:
             <button class="small ghost" data-q="care">Care costs £60k from 85</button>
             <button class="small ghost" data-q="infl">Inflation 4%</button>
-            <button class="small ghost" data-q="ret">Returns 2% lower</button></p>
+            <button class="small ghost" data-q="ret">Returns 2% lower</button>
+            <button class="small ghost" data-q="lower">Lower return scenario</button>
+            <button class="small ghost" data-q="upper">Upper return scenario</button></p>
           <p id="msg" class="muted"></p>
           <p class="muted" style="font-size:12px">Saved versions: ${versions.map((v) => `v${v.version} ${esc(v.saved_at.slice(0, 10))}${v.note ? " – " + esc(v.note) : ""}`).join("; ")}</p>
         </div>
@@ -242,9 +314,13 @@ async function planView(cid, name) {
           <div class="chart"><canvas id="ch"></canvas></div>
           <p class="muted" style="font-size:12px;margin:6px 0 0">Click a year on the chart or in the table to see its figures.</p></div>
         <div class="panel" id="detail"><p class="muted">Select a year.</p></div>
-        <div class="panel"><h2>Year by year</h2><div class="years"><table id="years"></table></div></div>
       </div>
-    </div>`;
+    </div>
+    <div class="panel">
+      <div class="tabs">${Object.entries(SPECS).map(([k, s]) => `<button data-tab="${k}">${esc(s.title.split(" (")[0])}</button>`).join("")}<button data-tab="order">Withdrawal order</button></div>
+      <div id="tabBody" class="scroll"></div>
+    </div>
+    <div class="panel"><h2>Year by year</h2><div class="years"><table id="years"></table></div></div>`;
 
   document.getElementById("planSel").onchange = (e) => (location.hash = `#/client/${cid}/plan/${encodeURIComponent(e.target.value)}`);
 
@@ -257,7 +333,10 @@ async function planView(cid, name) {
     if (t === "int" || t === "int?") return v === "" ? (t === "int?" ? null : 0) : parseInt(v, 10);
     if (t === "num") return +v || 0;
     if (t === "bool") return el.checked;
-    if (t === "pot") return v || null;
+    if (t === "pot" || t === "pot?" || t === "portfolio" || t === "product" || t === "date?") return v || null;
+    if (t === "inflbool") return el.checked ? null : 0;
+    if (t === "growth") return v === "" ? 0 : +v / 100;
+    if (t === "atr") return v === "" ? null : +v;
     return v === "" && t === "text?" ? null : v;
   };
   function bindFields() {
@@ -265,8 +344,8 @@ async function planView(cid, name) {
       const k = el.dataset.k, t = el.dataset.t;
       if (t === "pot") el.innerHTML = `<option value="">(none)</option>` + plan.pots.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("");
       const v = get(k);
-      el.value = t === "pct" ? pct(v) : v ?? "";
-      el.oninput = () => { set(k, read(el, t)); refresh(); };
+      if (t === "bool") el.checked = !!v; else el.value = t === "pct" ? pct(v) : v ?? "";
+      el.oninput = el.onchange = () => { set(k, read(el, t)); if (k === "assumptions.return_scenario") renderTab(); refresh(); };
     });
   }
   bindFields();
@@ -291,12 +370,22 @@ async function planView(cid, name) {
       });
       return;
     }
-    const spec = SPECS[tab], rows = plan[tab];
+    const spec = SPECS[tab], rows = (plan[tab] ||= []);
     const potOpts = (v) => plan.pots.map((p) => `<option value="${esc(p.id)}" ${p.id === v ? "selected" : ""}>${esc(p.name)}</option>`).join("");
     const cell = (r, i, [k, , t]) => {
       const v = r[k], at = `data-r="${i}" data-c="${k}"`;
-      if (Array.isArray(t)) return `<select ${at}>${t.map((o) => `<option ${o === v ? "selected" : ""} value="${o}">${esc(POT_LABELS[o] || o.replace("_", "-"))}</option>`).join("")}</select>`;
+      if (Array.isArray(t)) return `<select ${at}>${t.map((o) => `<option ${o === v ? "selected" : ""} value="${o}">${esc(POT_LABELS[o] || label(o))}</option>`).join("")}</select>`;
+      if (t && typeof t === "object") return `<select ${at}>${Object.entries(t).map(([o, l]) => `<option ${o === (v ?? "") ? "selected" : ""} value="${o}">${esc(l)}</option>`).join("")}</select>`;
       if (t === "pot") return `<select ${at}>${potOpts(v)}</select>`;
+      if (t === "pot?") return `<select ${at}><option value="">Cashflow (withdrawal order)</option>${potOpts(v)}</select>`;
+      if (t === "date?") return `<input type="date" ${at} value="${esc(v ?? "")}" style="width:140px">`;
+      if (t === "inflbool") return `<input type="checkbox" ${at} ${v == null ? "checked" : ""}>`;
+      if (t === "growth") { const g = grossOf(r); return `<input type="number" step="0.01" ${at} value="${pct(g)}" style="width:80px" title="${r.growth_custom || r.atr == null ? "Custom rate" : "From ATR " + r.atr}">${r.growth_custom && r.atr != null ? `<button class="small ghost" data-reset="${i}" title="Use the ATR rate">↺</button>` : ""}`; }
+      if (t === "charges") return `<button class="small ghost" data-chg="${i}">${pct(potCharges(r))}%${(r.charges || []).some((c) => c.amount) ? " + fees" : ""} ✎</button>`;
+      if (t === "net") return `<b>${pct(grossOf(r) - potCharges(r))}%</b>`;
+      if (t === "atr") return `<select ${at} style="min-width:70px"><option value="">–</option>${atrOptions(SETTINGS, v)}</select>`;
+      if (t === "portfolio") return `<select ${at} style="min-width:150px"><option value="">–</option>${SETTINGS.portfolios.map((p) => `<option ${p.name === v ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select>`;
+      if (t === "product") return `<select ${at}><option value="">–</option>${Object.keys(SETTINGS.product_returns).map((n) => `<option ${n === v ? "selected" : ""}>${esc(n)}</option>`).join("")}</select>`;
       if (t === "bool") return `<input type="checkbox" ${at} ${v ? "checked" : ""}>`;
       if (t.startsWith("pct")) return `<input type="number" step="0.01" ${at} value="${v == null ? "" : pct(v)}" placeholder="${t === "pct?" ? "assumed" : ""}" style="width:80px">`;
       if (t.startsWith("int")) return `<input type="number" ${at} value="${v ?? ""}" placeholder="${t === "int?" ? "end" : ""}" style="width:70px">`;
@@ -305,11 +394,36 @@ async function planView(cid, name) {
     };
     body.innerHTML = `<table class="edit"><tr>${spec.cols.map((c) => `<th>${esc(c[1])}</th>`).join("")}<th></th></tr>
       ${rows.map((r, i) => `<tr>${spec.cols.map((c) => `<td>${cell(r, i, c)}</td>`).join("")}<td><button class="small danger" data-del="${i}">✕</button></td></tr>`).join("")}</table>
-      <p><button class="small ghost" id="add">+ Add</button></p>
-      ${tab === "incomes" || tab === "expenses" ? `<p class="muted" style="font-size:12px">Leave inflation blank to use the assumed rate (keeps its value in today's terms). One-off items happen once, at the "from" age.</p>` : ""}`;
+      <p><button class="small ghost" id="add">+ Add</button>
+      ${tab === "incomes" ? `<button class="small ghost" id="addSP">+ State Pension</button>` : ""}</p>
+      ${tab === "pots" && chargePot != null && rows[chargePot] ? chargesEditor(rows[chargePot]) : ""}
+      ${HELP[tab] ? `<p class="muted" style="font-size:12px">${HELP[tab]}</p>` : ""}`;
+    if (tab === "pots" && chargePot != null && rows[chargePot]) bindCharges(rows[chargePot]);
+    body.querySelectorAll("[data-chg]").forEach((b) => (b.onclick = () => { chargePot = chargePot === +b.dataset.chg ? null : +b.dataset.chg; renderTab(); }));
+    body.querySelectorAll("[data-reset]").forEach((b) => (b.onclick = () => { rows[+b.dataset.reset].growth_custom = false; renderTab(); refresh(); }));
+    const sp = document.getElementById("addSP");
+    if (sp) sp.onclick = () => { rows.push({ name: "State Pension", amount: SETTINGS.full_state_pension_weekly, frequency: "weekly",
+      start_age: plan.client.state_pension_age || 67, end_age: null, inflation: SETTINGS.state_pension_increase, category: null, kind: "state_pension", taxable: true }); renderTab(); refresh(); };
     body.querySelectorAll("[data-r]").forEach((el) => {
-      const col = spec.cols.find((c) => c[0] === el.dataset.c), t = Array.isArray(col[2]) ? "text" : col[2];
-      el.oninput = el.onchange = () => { rows[+el.dataset.r][el.dataset.c] = read(el, t); if (tab === "pots") bindFields(); refresh(); };
+      const col = spec.cols.find((c) => c[0] === el.dataset.c), t = Array.isArray(col[2]) || typeof col[2] === "object" ? "text" : col[2];
+      el.onchange = () => {
+        const row = rows[+el.dataset.r];
+        let v = read(el, t);
+        if (el.dataset.c === "method" && v === "") v = null;
+        row[el.dataset.c] = v;
+        if (el.dataset.c === "growth_rate") row.growth_custom = true;
+        if (tab === "pots" && ["atr", "portfolio", "product", "type"].includes(el.dataset.c)) {
+          // Choosing a risk basis sets the growth from the ATR table; growth can still be overtyped.
+          if (el.dataset.c === "portfolio" && row.portfolio) row.atr = SETTINGS.portfolios.find((p) => p.name === row.portfolio)?.atr ?? row.atr;
+          if (row.product || ["cash", "current_account"].includes(row.type)) { row.atr = row.product ? null : row.atr; row.growth_custom = true; row.growth_rate = growthFor(SETTINGS, row) ?? row.growth_rate; }
+          else { row.growth_custom = false; row.growth_rate = growthFor(SETTINGS, row, plan.assumptions.return_scenario) ?? row.growth_rate; }
+          if (el.dataset.c === "type") { row.tax_mode = row.type === "pension" ? SETTINGS.pension_tax_mode : "flat"; if (!(row.charges || []).length) row.charges = JSON.parse(JSON.stringify(SETTINGS.charges[row.type] || [])); }
+        }
+        if (tab === "pots" || t === "inflbool") renderTab();
+        if (tab === "pots") bindFields();
+        refresh();
+      };
+      if (el.tagName === "INPUT" && el.type !== "checkbox" && el.type !== "date") el.oninput = () => { rows[+el.dataset.r][el.dataset.c] = read(el, t); if (el.dataset.c === "growth_rate") rows[+el.dataset.r].growth_custom = true; refresh(); };
     });
     body.querySelectorAll("[data-del]").forEach((b) => b.onclick = () => { rows.splice(+b.dataset.del, 1); renderTab(); refresh(); });
     document.getElementById("add").onclick = () => { rows.push(spec.blank(plan)); renderTab(); refresh(); };
@@ -324,7 +438,7 @@ async function planView(cid, name) {
   });
   function effectivePlan() {
     const p = JSON.parse(JSON.stringify(plan)), adj = +gAdj.value / 100;
-    if (adj) p.pots.forEach((x) => (x.growth_rate += adj));
+    if (adj) p.pots.forEach((x) => { x.growth_rate = grossOf(x) + adj; x.growth_custom = true; });
     return p;
   }
   function refresh() {
@@ -344,10 +458,15 @@ async function planView(cid, name) {
       ${retRow ? `<div class="kpi"><span>At retirement (${ret})</span><b>${gbp(retRow.savings_start)}</b></div>` : ""}
       <div class="kpi"><span>At age ${f.final_age}</span><b class="${f.final_savings < 0 ? "neg" : ""}">${gbp(f.final_savings)}</b></div>
       <div class="kpi"><span>Money runs out</span><b class="${f.assets_run_out_at ? "neg" : ""}">${f.assets_run_out_at ? "Age " + f.assets_run_out_at : "Never"}</b></div>`
-      + (runOut.length ? `<div class="kpi" style="grid-column:1/-1"><span>Pots running out</span><div>${runOut.map(([id, a]) => `${esc(f.pot_names[id])}: age ${a}`).join(" · ")}</div></div>` : "");
-    document.getElementById("years").innerHTML = `<tr><th>Age</th><th class="num">Start</th><th class="num">Income</th><th class="num">Spending</th><th class="num">Charges</th><th class="num">Tax</th><th class="num">End</th></tr>` +
-      f.rows.map((r, i) => `<tr data-i="${i}" class="${i === selected ? "sel" : ""}"><td>${r.age}</td><td class="num">${gbp(r.savings_start)}</td><td class="num">${gbp(r.total_income + r.net_withdrawals)}</td>
-        <td class="num">${gbp(r.total_expenses)}</td><td class="num">${gbp(r.total_charges)}</td><td class="num">${gbp(r.tax_paid)}</td><td class="num ${r.savings_end < 0 ? "neg" : ""}">${gbp(r.savings_end)}</td></tr>`).join("");
+      + `<div class="kpi"><span>Total charges</span><b>${gbp(f.totals.charges)}</b></div><div class="kpi"><span>Total tax</span><b>${gbp(f.totals.tax)}</b></div>
+         <div class="kpi"><span>Tax-free cash</span><b>${gbp(f.totals.tax_free_cash)}</b></div><div class="kpi"><span>Life events</span><b>${gbp(f.totals.events)}</b></div>`
+      + (runOut.length ? `<div class="kpi" style="grid-column:1/-1"><span>Pots running out</span><div>${runOut.map(([id, a]) => `${esc(f.pot_names[id])}: age ${a}`).join(" · ")}</div></div>` : "")
+      + `<div class="kpi" style="grid-column:1/-1"><span>Returns (${esc(plan.assumptions.return_scenario)} scenario): gross → net after charges</span><div>${Object.entries(f.pot_rates)
+          .filter(([id]) => f.rows[0]?.pots[id]?.opening > 0 || f.pot_types[id] !== "current_account")
+          .map(([id, r]) => `${esc(f.pot_names[id])}: ${pct(r.gross)}% → <strong>${pct(r.net)}%</strong>`).join(" · ")}</div></div>`;
+    document.getElementById("years").innerHTML = `<tr><th>Age</th><th class="num">Start</th><th class="num">Income</th><th class="num">Spending</th><th class="num">Withdrawals</th><th class="num">Drawn from savings</th><th class="num">Charges</th><th class="num">Tax</th><th class="num">Tax-free cash</th><th class="num">End</th></tr>` +
+      f.rows.map((r, i) => `<tr data-i="${i}" class="${i === selected ? "sel" : ""}"><td>${r.age}${r.events.length ? ` <span title="${esc(r.events.map((e) => e.name).join(", "))}">◆</span>` : ""}</td><td class="num">${gbp(r.savings_start)}</td><td class="num">${gbp(r.total_income)}</td>
+        <td class="num">${gbp(r.total_expenses)}</td><td class="num">${gbp(r.net_withdrawals)}</td><td class="num">${gbp(r.drawn_for_shortfall_net)}</td><td class="num">${gbp(r.total_charges)}</td><td class="num">${gbp(r.tax_paid)}</td><td class="num">${gbp(r.tax_free_cash)}</td><td class="num ${r.savings_end < 0 ? "neg" : ""}">${gbp(r.savings_end)}</td></tr>`).join("");
     document.querySelectorAll("#years tr[data-i]").forEach((tr) => tr.onclick = () => selectYear(+tr.dataset.i));
     drawChart();
     if (selected != null && f.rows[selected]) showDetail(selected);
@@ -367,12 +486,20 @@ async function planView(cid, name) {
       type = "bar"; stacked = false;
       datasets = [
         { label: "Income", data: f.rows.map((r) => r.total_income), backgroundColor: "#3d9970" },
-        { label: "Planned withdrawals", data: f.rows.map((r) => r.net_withdrawals), backgroundColor: "#4bacc6" },
+        { label: "Scheduled withdrawals", data: f.rows.map((r) => r.net_withdrawals), backgroundColor: "#4bacc6" },
+        { label: "Income tax", data: f.rows.map((r) => -r.income_tax), backgroundColor: "#7f7f7f" },
         { label: "Drawn from savings", data: f.rows.map((r) => r.drawn_for_shortfall_net), backgroundColor: "#e0a030" },
         { label: "Expenditure", data: f.rows.map((r) => -r.total_expenses), backgroundColor: "#c0504d" }];
       stacked = true;
     }
-    chart("ch", { type, data: { labels, datasets }, options: {
+    const marks = f.rows.map((r, i) => (r.events.length ? [i, r.events.map((e) => e.name).join(", ")] : null)).filter(Boolean);
+    const eventLines = { id: "events", afterDatasetsDraw(c) {
+      const { ctx, chartArea: a, scales: { x } } = c; ctx.save();
+      marks.forEach(([i, text], n) => { const px = x.getPixelForValue(i); ctx.strokeStyle = "#8e5ea2"; ctx.setLineDash([4, 3]);
+        ctx.beginPath(); ctx.moveTo(px, a.top); ctx.lineTo(px, a.bottom); ctx.stroke(); ctx.setLineDash([]);
+        ctx.fillStyle = "#8e5ea2"; ctx.font = "11px system-ui"; ctx.fillText("◆ " + text, Math.min(px + 3, a.right - 120), a.top + 12 + (n % 3) * 13); });
+      ctx.restore(); } };
+    chart("ch", { type, data: { labels, datasets }, plugins: [eventLines], options: {
       responsive: true, maintainAspectRatio: false, animation: false, interaction: { mode: "index", intersect: false },
       scales: { x: { stacked, title: { display: true, text: "Age" } }, y: { stacked, ticks: { callback: (v) => gbp(v) } } },
       plugins: { tooltip: { callbacks: { label: (c) => `${c.dataset.label}: ${gbp(c.raw)}` } }, legend: { position: "bottom", labels: { boxWidth: 12 } } },
@@ -383,10 +510,14 @@ async function planView(cid, name) {
     const r = forecast.rows[i];
     document.getElementById("detail").innerHTML = `<h2>Age ${r.age} (${r.year}${r.fraction < 1 ? ", part year" : ""})</h2>
       <div class="kpis"><div class="kpi"><span>Income</span><b>${gbp(r.total_income)}</b></div><div class="kpi"><span>Spending</span><b>${gbp(r.total_expenses)}</b></div>
-      <div class="kpi"><span>Surplus / shortfall</span><b class="${r.surplus_deficit < 0 ? "neg" : ""}">${gbp(r.surplus_deficit)}</b></div><div class="kpi"><span>Tax on withdrawals</span><b>${gbp(r.tax_paid)}</b></div></div>
-      <div class="scroll"><table class="detail"><tr><th>Pot</th><th class="num">Opening</th><th class="num">Charges</th><th class="num">Paid in</th><th class="num">Withdrawn</th><th class="num">Growth</th><th class="num">Closing</th></tr>
-      ${Object.entries(r.pots).map(([id, p]) => `<tr><td>${esc(forecast.pot_names[id])}</td><td class="num">${gbp(p.opening)}</td><td class="num">${gbp(p.charges)}</td>
-        <td class="num">${gbp(p.contributions + p.surplus_saved)}</td><td class="num">${gbp(p.withdrawals_gross + p.drawn_for_shortfall_gross)}</td><td class="num">${gbp(p.growth)}</td><td class="num">${gbp(p.closing)}</td></tr>`).join("")}
+      <div class="kpi"><span>Surplus / shortfall</span><b class="${r.surplus_deficit < 0 ? "neg" : ""}">${gbp(r.surplus_deficit)}</b></div><div class="kpi"><span>Tax</span><b>${gbp(r.tax_paid)}</b></div>
+      <div class="kpi"><span>Taxable income</span><b>${gbp(r.taxable_income)}</b></div><div class="kpi"><span>Tax-free cash</span><b>${gbp(r.tax_free_cash)}</b></div></div>
+      ${r.events.length ? `<p><b>Life events:</b> ${r.events.map((e) => `${esc(e.name)} ${gbp(e.amount)}${e.pot_id ? ` from ${esc(forecast.pot_names[e.pot_id] || "")}` : ""}`).join("; ")}</p>` : ""}
+      ${r.tax_bands.length ? `<p class="muted" style="font-size:12px">Income tax: ${r.tax_bands.map(([n, rate, amt, t]) => `${esc(n)} ${pct(rate)}% on ${gbp(amt)} = ${gbp(t)}`).join("; ")}</p>` : ""}
+      <div class="scroll"><table class="detail"><tr><th>Pot</th><th class="num">Opening</th><th class="num">Charges</th><th class="num">Paid in</th><th class="num">Withdrawn</th><th class="num">Tax</th><th class="num">Growth</th><th class="num">Closing</th></tr>
+      ${Object.entries(r.pots).map(([id, p]) => `<tr><td>${esc(forecast.pot_names[id])}</td><td class="num">${gbp(p.opening)}</td>
+        <td class="num" title="${esc(Object.entries(p.charges_by_type).map(([k, v]) => `${k}: ${gbp(v)}`).join("\n"))}">${gbp(p.charges)}</td>
+        <td class="num">${gbp(p.contributions + p.surplus_saved)}</td><td class="num">${gbp(p.withdrawals_gross + p.drawn_for_shortfall_gross + p.events_gross)}</td><td class="num">${gbp(p.tax)}</td><td class="num">${gbp(p.growth)}</td><td class="num">${gbp(p.closing)}</td></tr>`).join("")}
       </table></div>${r.unfunded_shortfall > 0 ? `<p class="neg">Unfunded shortfall this year: ${gbp(r.unfunded_shortfall)}</p>` : ""}`;
   }
 
@@ -396,6 +527,25 @@ async function planView(cid, name) {
   document.getElementById("save").onclick = async () => {
     try { const p = effectivePlan(); p.name = name; await saveAs(p, document.getElementById("note").value); location.reload(); } catch (e) { msg(e.message); }
   };
+  async function download(fmt) {
+    try {
+      msg("Preparing the " + (fmt === "pdf" ? "PDF report" : "Excel export") + "…");
+      const p = effectivePlan(); p.name = name;
+      const res = await fetch(`/api/report/${fmt}`, { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ plan: p, client_id: cid }) });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.statusText);
+      const blob = await res.blob();
+      const cd = res.headers.get("Content-Disposition") || "";
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = (cd.match(/filename="([^"]+)"/) || [])[1] || `forecast.${fmt}`;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+      msg("");
+    } catch (e) { msg(e.message); }
+  }
+  document.getElementById("pdfBtn").onclick = () => download("pdf");
+  document.getElementById("xlsxBtn").onclick = () => download("xlsx");
   document.getElementById("saveAs").onclick = async () => {
     const n = document.getElementById("scName").value.trim();
     if (!n) return msg("Give the scenario a name");
@@ -407,9 +557,10 @@ async function planView(cid, name) {
   document.querySelectorAll("[data-q]").forEach((b) => b.onclick = async () => {
     const p = JSON.parse(JSON.stringify(base)); let n, note;
     if (b.dataset.q === "care") { n = "Long-term care from 85"; note = "£60,000 a year from age 85, rising with inflation";
-      p.expenses.push({ name: "Long-term care", amount: 60000, frequency: "annual", start_age: 85, end_age: null, inflation: null, category: "care" }); }
+      (p.events ||= []).push({ name: "Long-term care", kind: "care", amount: 60000, frequency: "annual", start_age: 85, end_age: null, inflation: null, category: "care", pot_id: null }); }
+    if (b.dataset.q === "lower" || b.dataset.q === "upper") { n = `${label(b.dataset.q)} returns`; note = `ATR returns: ${b.dataset.q} scenario`; p.assumptions.return_scenario = b.dataset.q; }
     if (b.dataset.q === "infl") { n = "Inflation 4%"; note = "Inflation raised to 4%"; p.assumptions.inflation = 0.04; }
-    if (b.dataset.q === "ret") { n = "Returns 2% lower"; note = "All growth rates 2% lower"; p.pots.forEach((x) => (x.growth_rate -= 0.02)); }
+    if (b.dataset.q === "ret") { n = "Returns 2% lower"; note = "All growth rates 2% lower"; p.pots.forEach((x) => { x.growth_rate = grossOf(x) - 0.02; x.growth_custom = true; }); }
     if (client.plans.includes(n)) { location.hash = `#/client/${cid}/plan/${encodeURIComponent(n)}`; return; }
     p.name = n; await saveAs(p, note); location.hash = `#/client/${cid}/plan/${encodeURIComponent(n)}`;
   });
@@ -452,6 +603,99 @@ async function auditView(cid) {
       ${d.result ? `Savings at ${d.result.final_age}: ${gbp(d.result.final_savings)}${d.impact_on_final_savings != null ? ` (${d.impact_on_final_savings >= 0 ? "+" : ""}${gbp(d.impact_on_final_savings)})` : ""}. ` : ""}
       ${d.changes?.length ? `<details><summary>${d.changes.length} change${d.changes.length > 1 ? "s" : ""}</summary><ul>${d.changes.map((c) => `<li>${esc(c.field)}: ${fmt(c.from)} → ${fmt(c.to)}</li>`).join("")}</ul></details>` : ""}</td></tr>`; }).join("")}
   </table></div>`;
+}
+
+// ---------------------------------------------------------------- default assumptions
+async function settingsView() {
+  nav([["#/clients", "Clients", false], ["#/settings", "Default assumptions", true]]);
+  const d = await api("/api/settings");
+  const pctIn = (attr, v, w = 80) => `<input type="number" step="0.01" ${attr} value="${pct(v)}" style="width:${w}px">`;
+  const TYPES = ["pension", "isa", "gia", "cash", "other"];
+  function render() {
+    $app.innerHTML = `<h1>Default assumptions</h1>
+    <p class="muted">These are the starting values for new clients and imported fact finds, and for any pot when you pick an ATR, portfolio or product. You can still change them on any plan or pot. Changing them here doesn't alter forecasts you've already saved. Every change is recorded in the audit trail.</p>
+    <div class="grid2">
+      <div>
+        <div class="panel"><h2>Assumed returns by attitude to risk (before charges)</h2>
+          <table class="edit"><tr><th>ATR</th><th>Risk profile</th><th>Lower %</th><th>Central %</th><th>Upper %</th></tr>
+          ${Array.from({ length: 10 }, (_, i) => i + 1).map((k) => { const r = d.atr_table[k]; return `<tr><td>${k}</td><td><input data-al="${k}" value="${esc(r.label)}"></td>
+            <td>${pctIn(`data-alo="${k}"`, r.lower)}</td><td>${pctIn(`data-ace="${k}"`, r.central)}</td><td>${pctIn(`data-aup="${k}"`, r.upper)}</td></tr>`; }).join("")}</table>
+          <div class="row" style="margin-top:10px"><div><label>Default ATR for new clients</label><select id="s_defatr">${atrOptions(d, d.default_atr)}</select></div>
+          <div><label>Default return scenario</label><select id="s_sc">${["lower", "central", "upper"].map((x) => `<option ${x === d.return_scenario ? "selected" : ""} value="${x}">${label(x)}</option>`).join("")}</select></div></div></div>
+        <div class="panel"><h2>Charges by pot type</h2>
+          <p class="muted" style="font-size:12px">Each new or imported pot starts with these charges. Percentages are a year, on the pot's value. Fixed fees are £ a year in today's money.</p>
+          <div class="scroll"><table class="edit"><tr><th>Charge</th>${TYPES.map((t) => `<th>${POT_LABELS[t]}</th>`).join("")}</tr>
+          ${Object.entries(CHARGE_KINDS).map(([k, l]) => `<tr><td>${l}${k === "fixed" ? " (£)" : " (%)"}</td>${TYPES.map((t) => {
+            const c = (d.charges[t] || []).find((x) => x.kind === k); const v = c ? (k === "fixed" ? c.amount : c.rate) : 0;
+            return `<td>${k === "fixed" ? `<input type="number" step="1" data-cf="${t}" value="${v || 0}" style="width:70px">` : pctIn(`data-cp="${t}:${k}"`, v, 70)}</td>`; }).join("")}</tr>`).join("")}
+          <tr><th>Total %</th>${TYPES.map((t) => `<th>${pct((d.charges[t] || []).reduce((a, c) => a + (c.rate || 0), 0))}%</th>`).join("")}</tr></table></div></div>
+      </div>
+      <div>
+        <div class="panel"><h2>General</h2><div class="row">
+          <div><label>Inflation %</label>${pctIn('id="s_infl"', d.inflation)}</div>
+          <div><label>Plan to age</label><input type="number" id="s_end" value="${d.end_age}" style="width:80px"></div>
+          <div><label>Cash return %</label>${pctIn('id="s_cash"', d.cash_return)}</div>
+          <div><label>Current account %</label>${pctIn('id="s_cur"', d.current_account_return)}</div></div></div>
+        <div class="panel"><h2>Pensions and State Pension</h2><div class="row">
+          <div><label>Pension tax</label><select id="s_ptm"><option value="uk" ${d.pension_tax_mode === "uk" ? "selected" : ""}>UK income tax</option><option value="flat" ${d.pension_tax_mode === "flat" ? "selected" : ""}>Flat rate</option></select></div>
+          <div><label>Default withdrawal method</label><select id="s_pwm">${Object.entries(METHODS).map(([k, l]) => `<option value="${k}" ${k === d.pension_withdrawal_method ? "selected" : ""}>${l}</option>`).join("")}</select></div></div>
+          <div class="row" style="margin-top:8px"><div><label>Full new State Pension (£ a week)</label><input type="number" step="0.01" id="s_sp" value="${d.full_state_pension_weekly}"></div>
+          <div><label>State Pension increase % (blank = inflation)</label><input type="number" step="0.01" id="s_spi" value="${d.state_pension_increase == null ? "" : pct(d.state_pension_increase)}"></div></div></div>
+        <div class="panel"><h2>Model portfolios</h2>
+          <table class="edit"><tr><th>Portfolio</th><th>ATR</th><th></th></tr>
+          ${d.portfolios.map((p, i) => `<tr><td><input data-pn="${i}" value="${esc(p.name)}"></td>
+            <td><select data-pa="${i}" style="min-width:120px">${atrOptions(d, p.atr)}</select></td>
+            <td><button class="small danger" data-pd="${i}">✕</button></td></tr>`).join("")}</table>
+          <p><button class="small ghost" id="addP">+ Add portfolio</button></p></div>
+        <div class="panel"><h2>Fixed-rate products</h2>
+          <p class="muted" style="font-size:12px">These grow at a fixed rate whatever the client's ATR. An imported holding whose name contains the product name uses it automatically.</p>
+          <table class="edit"><tr><th>Product</th><th>Return %</th><th></th></tr>
+          ${Object.entries(d.product_returns).map(([n, r], i) => `<tr><td><input data-xn="${i}" value="${esc(n)}"></td><td>${pctIn(`data-xr="${i}"`, r)}</td>
+            <td><button class="small danger" data-xd="${i}">✕</button></td></tr>`).join("")}</table>
+          <p><button class="small ghost" id="addX">+ Add product</button></p></div>
+      </div>
+    </div>
+    <div class="panel"><div class="row"><div style="flex:3"><label>Note for the audit trail</label><input id="s_note" placeholder="What changed and why"></div>
+      <div><button id="s_save">Save defaults</button></div><div><button class="ghost" id="s_reset">Reset to original</button></div></div>
+      <p id="s_msg" class="muted"></p></div>`;
+    const num = (sel) => +document.querySelector(sel).value / 100;
+    function collect() {
+      for (let k = 1; k <= 10; k++) {
+        const r = d.atr_table[k]; r.label = document.querySelector(`[data-al="${k}"]`).value;
+        r.lower = num(`[data-alo="${k}"]`); r.central = num(`[data-ace="${k}"]`); r.upper = num(`[data-aup="${k}"]`);
+      }
+      d.default_atr = +document.getElementById("s_defatr").value; d.return_scenario = document.getElementById("s_sc").value;
+      d.inflation = num("#s_infl"); d.end_age = +document.getElementById("s_end").value;
+      d.cash_return = num("#s_cash"); d.current_account_return = num("#s_cur");
+      d.pension_tax_mode = document.getElementById("s_ptm").value; d.pension_withdrawal_method = document.getElementById("s_pwm").value;
+      d.full_state_pension_weekly = +document.getElementById("s_sp").value;
+      const spi = document.getElementById("s_spi").value; d.state_pension_increase = spi === "" ? null : +spi / 100;
+      TYPES.forEach((t) => {
+        const list = Object.keys(CHARGE_KINDS).filter((k) => k !== "fixed").map((k) => ({ kind: k, rate: num(`[data-cp="${t}:${k}"]`), amount: 0, name: null }));
+        list.push({ kind: "fixed", rate: 0, amount: +document.querySelector(`[data-cf="${t}"]`).value || 0, name: null });
+        d.charges[t] = list.filter((c) => c.rate || c.amount || ["pension", "isa", "gia"].includes(t));
+      });
+      d.portfolios = d.portfolios.map((p, i) => ({ name: document.querySelector(`[data-pn="${i}"]`).value.trim(), atr: +document.querySelector(`[data-pa="${i}"]`).value })).filter((p) => p.name);
+      const prods = {};
+      Object.keys(d.product_returns).forEach((_, i) => { const n = document.querySelector(`[data-xn="${i}"]`).value.trim(); if (n) prods[n] = num(`[data-xr="${i}"]`); });
+      d.product_returns = prods;
+    }
+    document.querySelectorAll("[data-cp],[data-ace]").forEach((i) => (i.onchange = () => { collect(); render(); }));
+    document.getElementById("addP").onclick = () => { collect(); d.portfolios.push({ name: "New portfolio", atr: d.default_atr }); render(); };
+    document.getElementById("addX").onclick = () => { collect(); d.product_returns["New product"] = 0; render(); };
+    document.querySelectorAll("[data-pd]").forEach((b) => (b.onclick = () => { collect(); d.portfolios.splice(+b.dataset.pd, 1); render(); }));
+    document.querySelectorAll("[data-xd]").forEach((b) => (b.onclick = () => { collect(); delete d.product_returns[Object.keys(d.product_returns)[+b.dataset.xd]]; render(); }));
+    document.getElementById("s_save").onclick = async () => {
+      collect();
+      try { await api("/api/settings", { body: { defaults: d, note: document.getElementById("s_note").value } }); render(); document.getElementById("s_msg").textContent = "Saved."; }
+      catch (e) { document.getElementById("s_msg").textContent = e.message; }
+    };
+    document.getElementById("s_reset").onclick = async () => {
+      if (!confirm("Reset every default assumption to the original values?")) return;
+      Object.assign(d, await api("/api/settings/reset", { body: {} })); render(); document.getElementById("s_msg").textContent = "Reset to the original defaults.";
+    };
+  }
+  render();
 }
 
 route();

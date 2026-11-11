@@ -13,16 +13,17 @@ from datetime import date
 from pathlib import Path
 
 from fastapi import Body, FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from cashflow_engine import project
+from cashflow_engine import FirmDefaults, project
 from cashflow_engine.serialize import from_dict, plan_from_dict, plan_to_dict, to_dict
 from client_store import ClientStore, WrongPassphrase
 from fact_find_import import read_fact_find
 from fact_find_import.factfind import FactFind
 from fact_find_import.reader import UnknownFormat
-from fact_find_import.to_plan import ImportDefaults, to_plan
+from fact_find_import.to_plan import to_plan
+from reporting import build, render_pdf, render_xlsx
 
 STATIC = Path(__file__).parent / "static"
 DEFAULT_DB = Path(os.environ.get("CASHFLOW_DB", Path.home() / "CashflowPlanner" / "clients.db"))
@@ -49,6 +50,8 @@ def forecast_json(plan) -> dict:
         "pots_run_out_at": {p.id: f.pot_depletion_age(p.id) for p in plan.pots},
         "pot_names": {p.id: p.name for p in plan.pots},
         "pot_types": {p.id: p.type.value for p in plan.pots},
+        "pot_rates": f.pot_rates,
+        "totals": f.totals(),
         "rows": to_dict(f.rows),
     }
 
@@ -85,6 +88,31 @@ def lock():
     return {"ok": True}
 
 
+# -- firm-wide default assumptions -------------------------------------------
+@app.get("/api/settings")
+def get_settings():
+    return to_dict(store().get_defaults())
+
+
+@app.post("/api/settings")
+def save_settings(body: dict = Body(...)):
+    try:
+        d = from_dict(FirmDefaults, body["defaults"])
+        for k in range(1, 11):
+            for sc in ("lower", "central", "upper"):
+                d.atr_return(k, sc)
+    except (KeyError, TypeError, ValueError) as e:
+        raise HTTPException(400, f"Settings are incomplete: {e}")
+    store().save_defaults(d, body.get("note", ""))
+    return {"ok": True}
+
+
+@app.post("/api/settings/reset")
+def reset_settings():
+    store().save_defaults(FirmDefaults(), "Reset to original defaults")
+    return to_dict(FirmDefaults())
+
+
 # -- clients ----------------------------------------------------------------
 @app.get("/api/clients")
 def clients():
@@ -97,13 +125,16 @@ def create_client(body: dict = Body(...)):
     from cashflow_engine import Assumptions, Person, Plan, Pot, PotType
 
     dob = date.fromisoformat(body["date_of_birth"])
+    defaults = store().get_defaults()
     plan = Plan(
         name="Baseline",
         client=Person(body["name"], dob, body.get("retirement_age")),
         start_date=date.fromisoformat(body.get("start_date") or date.today().isoformat()),
-        pots=[Pot("current", "Current account", PotType.CURRENT_ACCOUNT, 0, growth_rate=0.005)],
+        pots=[Pot("current", "Current account", PotType.CURRENT_ACCOUNT, 0,
+                  growth_rate=defaults.current_account_return)],
         withdrawal_order=["current"],
-        assumptions=Assumptions(),
+        assumptions=Assumptions(inflation=defaults.inflation, end_age=defaults.end_age,
+                                atr_returns=defaults.atr_returns_snapshot(), return_scenario=defaults.return_scenario),
     )
     cid = store().create_client(body["name"])
     store().save_plan(cid, plan, "Created")
@@ -157,6 +188,34 @@ def run_forecast(plan: dict = Body(...)):
 
 
 # -- fact-find import ---------------------------------------------------------
+REPORT_TYPES = {
+    "pdf": (render_pdf, "application/pdf"),
+    "xlsx": (render_xlsx, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+}
+
+
+@app.post("/api/report/{fmt}")
+def report(fmt: str, body: dict = Body(...)):
+    """The PDF report or Excel export for the plan on screen. With a client id,
+    the client's other saved plans are included as scenarios to compare."""
+    if fmt not in REPORT_TYPES:
+        raise HTTPException(404, "Unknown report type")
+    try:
+        plan = plan_from_dict(body["plan"])
+    except Exception as e:  # noqa: BLE001 - shown to the adviser
+        raise HTTPException(400, f"Plan is not valid: {e}")
+    others = []
+    cid = body.get("client_id")
+    if cid:
+        s = store()
+        others = [s.load_plan(cid, n) for n in s.plan_names(cid) if n != plan.name]
+    render, mime = REPORT_TYPES[fmt]
+    content = render(build(plan, others))
+    safe = "".join(ch for ch in f"{plan.client.name} {plan.name}" if ch.isalnum() or ch in " -_").strip()
+    filename = f"Forecast - {safe or 'client'} - {date.today():%Y-%m-%d}.{fmt}"
+    return Response(content, media_type=mime, headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
 @app.post("/api/import")
 async def import_pdf(file: UploadFile = File(...)):
     store()  # must be unlocked
@@ -170,23 +229,23 @@ async def import_pdf(file: UploadFile = File(...)):
         raise HTTPException(400, str(e))
     finally:
         os.unlink(tmp)
-    return {"fact_find": to_dict(ff), "defaults": to_dict(ImportDefaults())}
+    return {"fact_find": to_dict(ff), "defaults": to_dict(store().get_defaults())}
 
 
 @app.post("/api/import/confirm")
 def confirm_import(body: dict = Body(...)):
     ff = from_dict(FactFind, body["fact_find"])
-    defaults = from_dict(ImportDefaults, body.get("defaults") or {}) if body.get("defaults") else None
+    defaults = from_dict(FirmDefaults, body["defaults"]) if body.get("defaults") else store().get_defaults()
     try:
         plan = to_plan(ff, start_date=date.fromisoformat(body["start_date"]),
                        date_of_birth=date.fromisoformat(body["date_of_birth"]) if body.get("date_of_birth") else None,
-                       defaults=defaults)
+                       defaults=defaults, atr=body.get("atr"))
     except ValueError as e:
         raise HTTPException(400, str(e))
     warnings = [w for w in ff.warnings if not (body.get("date_of_birth") and "date of birth" in w)]
     s = store()
     cid = s.create_client(plan.client.name, {
-        "source": ff.source, "completed_on": str(ff.completed_on or ""),
+        "source": ff.source, "atr": body.get("atr") or defaults.default_atr, "completed_on": str(ff.completed_on or ""),
         "objectives": ff.objectives, "notes": ff.notes,
         "other_assets": to_dict(ff.other_assets), "warnings": warnings,
     })

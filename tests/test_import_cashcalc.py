@@ -70,11 +70,13 @@ def test_other_assets_and_objectives(ff):
 
 def test_converts_to_plan_and_projects(ff):
     plan = to_plan(ff, start_date=date(2021, 10, 19), date_of_birth=date(1965, 1, 7),
-                   defaults=ImportDefaults(inflation=0.02,
-                                           charges={"pension": 0.01, "isa": 0.0},
-                                           growth={"pension": 0.05, "isa": 0.01,
-                                                   "current_account": 0.005}))
+                   defaults=ImportDefaults(inflation=0.02),
+                   atr=4)
     assert sum(p.value for p in plan.pots) == 376_300
+    invested = [p for p in plan.pots if p.type in (PotType.PENSION, PotType.ISA)]
+    assert all(p.growth_rate == 0.035 and p.atr == 4 for p in invested)  # ATR 4 central = 3.5%
+    assert plan.assumptions.atr_returns["4"]["upper"] == 0.05
+    assert plan.pot(invested[0].id).tax_mode == "uk"
     assert plan.withdrawal_order[0] == "current"
     assert plan.pot(plan.withdrawal_order[-1]).type == PotType.PENSION
     f = project(plan)

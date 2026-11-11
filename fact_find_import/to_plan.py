@@ -1,16 +1,16 @@
 """Turn a reviewed ``FactFind`` into a draft engine ``Plan``.
 
 The fact find holds no growth, charge or inflation assumptions, so these come
-from ``ImportDefaults``, which the adviser sets and can change afterwards.
+from the firm's default assumptions (``FirmDefaults``) and the client's
+attitude to risk. The adviser can change any of them afterwards.
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
 from datetime import date
 
-from cashflow_engine import Assumptions, Expense, Frequency, Income, Person, Plan, Pot, PotType
+from cashflow_engine import Assumptions, Expense, FirmDefaults, Frequency, Income, Person, Plan, Pot, PotType
 
 from .factfind import FactFind
 
@@ -19,20 +19,8 @@ KIND_TO_POT = {
     "cash": PotType.CASH, "other": PotType.OTHER,
 }
 
-
-@dataclass
-class ImportDefaults:
-    inflation: float = 0.025
-    end_age: int = 100
-    growth: dict = field(default_factory=lambda: {
-        "pension": 0.05, "isa": 0.05, "gia": 0.05, "cash": 0.02, "other": 0.03, "current_account": 0.005})
-    charges: dict = field(default_factory=lambda: {
-        "pension": 0.0075, "isa": 0.0075, "gia": 0.0075, "cash": 0.0, "other": 0.0, "current_account": 0.0})
-    # Flat tax on withdrawals: pensions 20% (or 15% allowing for 25% tax-free cash).
-    tax: dict = field(default_factory=lambda: {"pension": 0.20})
-    # Order pots are drawn on to cover a shortfall.
-    withdrawal_order: list = field(default_factory=lambda: [
-        "current_account", "cash", "gia", "isa", "other", "pension"])
+# Kept for older callers: import defaults are now the firm defaults.
+ImportDefaults = FirmDefaults
 
 
 def _slug(text: str, used: set[str]) -> str:
@@ -44,9 +32,18 @@ def _slug(text: str, used: set[str]) -> str:
     return slug
 
 
+def _product(name: str, products: dict[str, float]) -> str | None:
+    low = name.lower()
+    for p in products:
+        if p.lower() in low:
+            return p
+    return None
+
+
 def to_plan(ff: FactFind, start_date: date, date_of_birth: date | None = None,
-            defaults: ImportDefaults | None = None) -> Plan:
-    d = defaults or ImportDefaults()
+            defaults: FirmDefaults | None = None, atr: int | None = None) -> Plan:
+    d = defaults or FirmDefaults()
+    atr = atr if atr is not None else d.default_atr
     if not ff.clients:
         raise ValueError("The fact find has no client")
     main = ff.clients[0]
@@ -55,23 +52,27 @@ def to_plan(ff: FactFind, start_date: date, date_of_birth: date | None = None,
         raise ValueError(f"A date of birth is needed for {main.name}")
     start_age = start_date.year - dob.year - ((start_date.month, start_date.day) < (dob.month, dob.day))
 
-    used: set[str] = set()
+    used: set[str] = {"current"}
     pots = [Pot("current", "Current account", PotType.CURRENT_ACCOUNT, 0.0,
-                growth_rate=d.growth["current_account"])]
-    used.add("current")
+                growth_rate=d.current_account_return)]
     for h in ff.holdings:
         kind = h.kind if h.kind in KIND_TO_POT else "other"
+        product = _product(f"{h.name} {h.provider or ''}", d.product_returns)
+        if product:
+            kind = "cash"
+        invested = kind not in ("cash",) and not product
+        pension = kind == "pension"
         pots.append(Pot(
             id=_slug(h.name, used), name=h.name, type=KIND_TO_POT[kind], value=h.value,
-            growth_rate=d.growth.get(kind, 0.0), charge_rate=d.charges.get(kind, 0.0),
-            tax_rate=d.tax.get(kind, 0.0), owner=h.owner))
+            growth_rate=d.growth_for(kind, atr=atr if invested else None, product=product),
+            charges=d.charges_for(kind), tax_rate=d.tax.get(kind, 0.0), owner=h.owner,
+            atr=atr if invested else None, product=product,
+            tax_mode=d.pension_tax_mode if pension else "flat",
+            withdrawal_method=d.pension_withdrawal_method))
 
-    def item_freq(f: str) -> Frequency:
-        return Frequency(f)
-
-    expenses = [Expense(e.name, e.amount, item_freq(e.frequency), start_age=start_age,
+    expenses = [Expense(e.name, e.amount, Frequency(e.frequency), start_age=start_age,
                         category=e.priority or e.category) for e in ff.expenses]
-    incomes = [Income(i.name, i.amount, item_freq(i.frequency), start_age=start_age,
+    incomes = [Income(i.name, i.amount, Frequency(i.frequency), start_age=start_age,
                       category=i.category) for i in ff.incomes]
 
     rank = {k: n for n, k in enumerate(d.withdrawal_order)}
@@ -91,5 +92,6 @@ def to_plan(ff: FactFind, start_date: date, date_of_birth: date | None = None,
         incomes=incomes,
         expenses=expenses,
         withdrawal_order=order,
-        assumptions=Assumptions(inflation=d.inflation, end_age=d.end_age),
+        assumptions=Assumptions(inflation=d.inflation, end_age=d.end_age,
+                                atr_returns=d.atr_returns_snapshot(), return_scenario=d.return_scenario),
     )
