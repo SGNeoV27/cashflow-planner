@@ -49,6 +49,8 @@ def forecast_json(plan) -> dict:
         "pots_run_out_at": {p.id: f.pot_depletion_age(p.id) for p in plan.pots},
         "pot_names": {p.id: p.name for p in plan.pots},
         "pot_types": {p.id: p.type.value for p in plan.pots},
+        "pot_rates": f.pot_rates,
+        "totals": f.totals(),
         "rows": to_dict(f.rows),
     }
 
@@ -96,7 +98,8 @@ def save_settings(body: dict = Body(...)):
     try:
         d = from_dict(FirmDefaults, body["defaults"])
         for k in range(1, 11):
-            d.atr_return(k)
+            for sc in ("lower", "central", "upper"):
+                d.atr_return(k, sc)
     except (KeyError, TypeError, ValueError) as e:
         raise HTTPException(400, f"Settings are incomplete: {e}")
     store().save_defaults(d, body.get("note", ""))
@@ -129,7 +132,8 @@ def create_client(body: dict = Body(...)):
         pots=[Pot("current", "Current account", PotType.CURRENT_ACCOUNT, 0,
                   growth_rate=defaults.current_account_return)],
         withdrawal_order=["current"],
-        assumptions=Assumptions(inflation=defaults.inflation, end_age=defaults.end_age),
+        assumptions=Assumptions(inflation=defaults.inflation, end_age=defaults.end_age,
+                                atr_returns=defaults.atr_returns_snapshot(), return_scenario=defaults.return_scenario),
     )
     cid = store().create_client(body["name"])
     store().save_plan(cid, plan, "Created")
