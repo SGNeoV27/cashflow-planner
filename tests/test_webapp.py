@@ -46,7 +46,7 @@ def test_import_edit_and_compare(client):
     assert not any("date of birth" in w for w in info["details"]["warnings"])
 
     plan = client.get(f"/api/clients/{cid}/plans/Baseline").json()["plan"]
-    assert {p["growth_rate"] for p in plan["pots"] if p["type"] == "pension"} == {0.06}  # ATR 6
+    assert {p["growth_rate"] for p in plan["pots"] if p["type"] == "pension"} == {0.045}  # ATR 6 central
     assert plan["assumptions"]["inflation"] == 0.02
     f = client.post("/api/project", json=plan).json()
     assert f["rows"][0]["savings_start"] == pytest.approx(376_300)
@@ -68,10 +68,10 @@ def test_bad_plan_rejected(client):
 def test_settings_edit_and_reset(client):
     client.post("/api/unlock", json={"passphrase": "a good passphrase"})
     d = client.get("/api/settings").json()
-    assert d["atr_returns"]["1"] == 0.02 and d["product_returns"] == {"Premium Bonds": 0.0}
+    assert d["atr_table"]["1"]["central"] == 0.02 and d["product_returns"] == {"Premium Bonds": 0.0}
     d["inflation"] = 0.03
     assert client.post("/api/settings", json={"defaults": d, "note": "test"}).status_code == 200
     assert client.get("/api/settings").json()["inflation"] == 0.03
-    del d["atr_returns"]["10"]
+    del d["atr_table"]["10"]
     assert client.post("/api/settings", json={"defaults": d}).status_code == 400
     assert client.post("/api/settings/reset", json={}).json()["inflation"] == 0.02

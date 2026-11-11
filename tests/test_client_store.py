@@ -82,13 +82,13 @@ def test_list_and_update_clients(store):
 
 def test_firm_defaults_saved_and_audited(store):
     d = store.get_defaults()
-    assert d.inflation == 0.02 and d.atr_return(5) == 0.05
-    d.atr_returns["5"] = 0.045
+    assert d.inflation == 0.02 and d.atr_return(5) == 0.04
+    d.atr_table["5"].central = 0.045
     store.save_defaults(d, "Lower balanced return")
     assert store.get_defaults().atr_return(5) == 0.045
     entry = store.audit_trail()[-1]
     assert entry.action == "default assumptions changed"
-    assert {"field": "atr_returns.5", "from": 0.05, "to": 0.045} in entry.detail["changes"]
+    assert {"field": "atr_table.5.central", "from": 0.04, "to": 0.045} in entry.detail["changes"]
 
 
 def test_premium_bonds_get_fixed_return():
@@ -102,4 +102,4 @@ def test_premium_bonds_get_fixed_return():
     bonds = next(p for p in plan.pots if "Premium" in p.name)
     isa = next(p for p in plan.pots if p.name == "Stocks ISA")
     assert (bonds.growth_rate, bonds.product, bonds.atr) == (0.0, "Premium Bonds", None)
-    assert (isa.growth_rate, isa.atr) == (0.07, 8)
+    assert (isa.growth_rate, isa.atr) == (0.055, 8)

@@ -60,12 +60,15 @@ def to_plan(ff: FactFind, start_date: date, date_of_birth: date | None = None,
         product = _product(f"{h.name} {h.provider or ''}", d.product_returns)
         if product:
             kind = "cash"
-        invested = kind not in ("cash",)
+        invested = kind not in ("cash",) and not product
+        pension = kind == "pension"
         pots.append(Pot(
             id=_slug(h.name, used), name=h.name, type=KIND_TO_POT[kind], value=h.value,
             growth_rate=d.growth_for(kind, atr=atr if invested else None, product=product),
-            charge_rate=d.charges.get(kind, 0.0), tax_rate=d.tax.get(kind, 0.0), owner=h.owner,
-            atr=atr if invested and not product else None, product=product))
+            charges=d.charges_for(kind), tax_rate=d.tax.get(kind, 0.0), owner=h.owner,
+            atr=atr if invested else None, product=product,
+            tax_mode=d.pension_tax_mode if pension else "flat",
+            withdrawal_method=d.pension_withdrawal_method))
 
     expenses = [Expense(e.name, e.amount, Frequency(e.frequency), start_age=start_age,
                         category=e.priority or e.category) for e in ff.expenses]
@@ -89,5 +92,6 @@ def to_plan(ff: FactFind, start_date: date, date_of_birth: date | None = None,
         incomes=incomes,
         expenses=expenses,
         withdrawal_order=order,
-        assumptions=Assumptions(inflation=d.inflation, end_age=d.end_age),
+        assumptions=Assumptions(inflation=d.inflation, end_age=d.end_age,
+                                atr_returns=d.atr_returns_snapshot(), return_scenario=d.return_scenario),
     )

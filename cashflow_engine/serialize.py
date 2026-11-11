@@ -34,7 +34,9 @@ def _decode(tp: Any, value: Any) -> Any:
         (inner,) = get_args(tp)
         return [_decode(inner, v) for v in value]
     if origin is dict:
-        return dict(value)
+        args = get_args(tp)
+        vt = args[1] if len(args) == 2 else None
+        return {k: (_decode(vt, v) if vt is not None else v) for k, v in value.items()}
     args = [a for a in get_args(tp) if a is not type(None)]
     if args and origin is not None:  # Optional[X] / X | None
         return _decode(args[0], value)
