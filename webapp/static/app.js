@@ -10,6 +10,20 @@ const POT_LABELS = { current_account: "Current account", cash: "Cash", isa: "ISA
 const FREQS = ["weekly", "monthly", "quarterly", "annual", "one_off"];
 const COLOURS = ["#1f5f8b", "#3d9970", "#e0a030", "#8e5ea2", "#c0504d", "#4bacc6", "#7f7f7f", "#9bbb59"];
 
+function atrOptions(d, sel) {
+  return Array.from({ length: 10 }, (_, i) => i + 1).map((k) =>
+    `<option value="${k}" ${+sel === k ? "selected" : ""}>${k} (${pct(d.atr_returns[k])}%)</option>`).join("");
+}
+// Mirrors FirmDefaults.growth_for in the engine.
+function growthFor(d, pot) {
+  if (pot.product && pot.product in d.product_returns) return d.product_returns[pot.product];
+  if (pot.portfolio) { const p = d.portfolios.find((x) => x.name === pot.portfolio); if (p) return d.atr_returns[p.atr]; }
+  if (pot.type === "current_account") return d.current_account_return;
+  if (pot.type === "cash") return d.cash_return;
+  return d.atr_returns[pot.atr ?? d.default_atr];
+}
+let SETTINGS = null;
+
 async function api(path, opts = {}) {
   const init = { method: opts.method || (opts.body ? "POST" : "GET"), headers: {} };
   if (opts.body instanceof FormData) init.body = opts.body;
@@ -38,6 +52,7 @@ async function route() {
     if (parts[0] === "client" && parts[2] === "audit") return auditView(parts[1]);
     if (parts[0] === "client") return planView(parts[1], parts[3] || "Baseline");
     if (parts[0] === "review") return reviewView();
+    if (parts[0] === "settings") return settingsView();
     return clientsView();
   } catch (e) { $app.innerHTML = `<div class="warn">${esc(e.message)}</div>`; }
 }
@@ -67,7 +82,7 @@ function unlockView(st) {
 
 // ---------------------------------------------------------------- clients
 async function clientsView() {
-  nav([["#/clients", "Clients", true]]);
+  nav([["#/clients", "Clients", true], ["#/settings", "Default assumptions", false]]);
   const clients = await api("/api/clients");
   $app.innerHTML = `<h1>Clients</h1>
   <div class="grid2">
@@ -125,12 +140,13 @@ function reviewView() {
       ${ff.objectives.length ? `<h2>Objectives</h2>${ff.objectives.map((o) => `<p>${esc(o)}</p>`).join("")}` : ""}
     </div>
     <div class="panel"><h2>Starting assumptions</h2>
-      <p class="muted">The fact find has no growth or charge assumptions. These apply to every imported pot, and you can change each pot afterwards.</p>
-      <div class="row"><div><label>Inflation %</label><input type="number" step="0.01" id="d_infl" value="${pct(d.inflation)}"></div>
+      <p class="muted">These come from your <a href="#/settings">default assumptions</a>. They apply to every imported pot, and you can change any pot afterwards.</p>
+      <div class="row"><div><label>Attitude to risk</label><select id="d_atr">${atrOptions(d, d.default_atr)}</select></div>
+      <div><label>Inflation %</label><input type="number" step="0.01" id="d_infl" value="${pct(d.inflation)}"></div>
       <div><label>Plan to age</label><input type="number" id="d_end" value="${d.end_age}"></div></div>
-      <table class="edit"><tr><th>Type</th><th>Growth %</th><th>Charges %</th><th>Withdrawal tax %</th></tr>
+      <p class="muted" style="font-size:12px">Invested pots grow at the ATR's assumed return. Cash grows at ${pct(d.cash_return)}%. ${Object.entries(d.product_returns).map(([n, r]) => `${esc(n)} grow at ${pct(r)}%.`).join(" ")}</p>
+      <table class="edit"><tr><th>Type</th><th>Charges %</th><th>Withdrawal tax %</th></tr>
       ${["pension", "isa", "gia", "cash", "other"].map((k) => `<tr><td>${POT_LABELS[k]}</td>
-        <td><input type="number" step="0.01" data-g="${k}" value="${pct(d.growth[k] ?? 0)}"></td>
         <td><input type="number" step="0.01" data-c="${k}" value="${pct(d.charges[k] ?? 0)}"></td>
         <td><input type="number" step="0.01" data-t="${k}" value="${pct(d.tax[k] ?? 0)}"></td></tr>`).join("")}</table></div>
   </div>
@@ -153,9 +169,9 @@ function reviewView() {
     ff.clients[0].name = document.getElementById("r_name").value;
     const ret = document.getElementById("r_ret").value; ff.clients[0].retirement_age = ret ? +ret : null;
     const defaults = { ...d, inflation: +document.getElementById("d_infl").value / 100, end_age: +document.getElementById("d_end").value,
-      growth: { ...d.growth, ...num("data-g") }, charges: { ...d.charges, ...num("data-c") }, tax: { ...d.tax, ...num("data-t") } };
+      charges: { ...d.charges, ...num("data-c") }, tax: { ...d.tax, ...num("data-t") } };
     try {
-      const r = await api("/api/import/confirm", { body: { fact_find: ff, defaults,
+      const r = await api("/api/import/confirm", { body: { fact_find: ff, defaults, atr: +document.getElementById("d_atr").value,
         date_of_birth: document.getElementById("r_dob").value || null, start_date: document.getElementById("r_start").value } });
       sessionStorage.removeItem("review");
       location.hash = `#/client/${r.id}/plan/Baseline`;
@@ -169,6 +185,7 @@ const ITEM_COLS = [
   ["start_age", "From age", "int"], ["end_age", "To age", "int?"], ["inflation", "Inflation %", "pct?"], ["category", "Category", "text?"]];
 const SPECS = {
   pots: { title: "Pensions, savings and investments", cols: [["name", "Name", "text"], ["type", "Type", POT_TYPES], ["value", "Value £", "num"],
+    ["atr", "ATR", "atr"], ["portfolio", "Portfolio", "portfolio"], ["product", "Fixed-rate product", "product"],
     ["growth_rate", "Growth %", "pct"], ["charge_rate", "Charges %", "pct"], ["tax_rate", "Withdrawal tax %", "pct"]],
     blank: () => ({ id: "pot" + Date.now().toString(36), name: "New pot", type: "isa", value: 0, growth_rate: 0.05, charge_rate: 0.0075, tax_rate: 0, owner: null }) },
   incomes: { title: "Income", cols: ITEM_COLS, blank: (p) => ({ name: "Income", amount: 0, frequency: "annual", start_age: startAge(p), end_age: null, inflation: null, category: null }) },
@@ -193,6 +210,7 @@ function chart(id, cfg) { charts[id]?.destroy(); charts[id] = new Chart(document
 async function planView(cid, name) {
   const client = await api(`/api/clients/${cid}`);
   const { plan, versions } = await api(`/api/clients/${cid}/plans/${encodeURIComponent(name)}`);
+  SETTINGS = await api("/api/settings");
   nav([["#/clients", "Clients", false], [`#/client/${cid}/plan/Baseline`, client.name, true],
        [`#/client/${cid}/compare`, "Compare scenarios", false], [`#/client/${cid}/audit`, "Audit trail", false]]);
   let tab = "pots", selected = null, forecast = null, timer = null;
@@ -257,7 +275,8 @@ async function planView(cid, name) {
     if (t === "int" || t === "int?") return v === "" ? (t === "int?" ? null : 0) : parseInt(v, 10);
     if (t === "num") return +v || 0;
     if (t === "bool") return el.checked;
-    if (t === "pot") return v || null;
+    if (t === "pot" || t === "portfolio" || t === "product") return v || null;
+    if (t === "atr") return v === "" ? null : +v;
     return v === "" && t === "text?" ? null : v;
   };
   function bindFields() {
@@ -297,6 +316,9 @@ async function planView(cid, name) {
       const v = r[k], at = `data-r="${i}" data-c="${k}"`;
       if (Array.isArray(t)) return `<select ${at}>${t.map((o) => `<option ${o === v ? "selected" : ""} value="${o}">${esc(POT_LABELS[o] || o.replace("_", "-"))}</option>`).join("")}</select>`;
       if (t === "pot") return `<select ${at}>${potOpts(v)}</select>`;
+      if (t === "atr") return `<select ${at} style="min-width:70px"><option value="">–</option>${atrOptions(SETTINGS, v)}</select>`;
+      if (t === "portfolio") return `<select ${at} style="min-width:150px"><option value="">–</option>${SETTINGS.portfolios.map((p) => `<option ${p.name === v ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select>`;
+      if (t === "product") return `<select ${at}><option value="">–</option>${Object.keys(SETTINGS.product_returns).map((n) => `<option ${n === v ? "selected" : ""}>${esc(n)}</option>`).join("")}</select>`;
       if (t === "bool") return `<input type="checkbox" ${at} ${v ? "checked" : ""}>`;
       if (t.startsWith("pct")) return `<input type="number" step="0.01" ${at} value="${v == null ? "" : pct(v)}" placeholder="${t === "pct?" ? "assumed" : ""}" style="width:80px">`;
       if (t.startsWith("int")) return `<input type="number" ${at} value="${v ?? ""}" placeholder="${t === "int?" ? "end" : ""}" style="width:70px">`;
@@ -309,7 +331,19 @@ async function planView(cid, name) {
       ${tab === "incomes" || tab === "expenses" ? `<p class="muted" style="font-size:12px">Leave inflation blank to use the assumed rate (keeps its value in today's terms). One-off items happen once, at the "from" age.</p>` : ""}`;
     body.querySelectorAll("[data-r]").forEach((el) => {
       const col = spec.cols.find((c) => c[0] === el.dataset.c), t = Array.isArray(col[2]) ? "text" : col[2];
-      el.oninput = el.onchange = () => { rows[+el.dataset.r][el.dataset.c] = read(el, t); if (tab === "pots") bindFields(); refresh(); };
+      el.oninput = el.onchange = () => {
+        const row = rows[+el.dataset.r];
+        row[el.dataset.c] = read(el, t);
+        if (tab === "pots" && ["atr", "portfolio", "product", "type"].includes(el.dataset.c)) {
+          // Choosing a risk basis sets the growth from the default assumptions; growth can still be overtyped.
+          if (el.dataset.c === "portfolio" && row.portfolio) row.atr = SETTINGS.portfolios.find((p) => p.name === row.portfolio)?.atr ?? row.atr;
+          const g = growthFor(SETTINGS, row);
+          if (g != null) row.growth_rate = g;
+          renderTab();
+        }
+        if (tab === "pots") bindFields();
+        refresh();
+      };
     });
     body.querySelectorAll("[data-del]").forEach((b) => b.onclick = () => { rows.splice(+b.dataset.del, 1); renderTab(); refresh(); });
     document.getElementById("add").onclick = () => { rows.push(spec.blank(plan)); renderTab(); refresh(); };
@@ -452,6 +486,78 @@ async function auditView(cid) {
       ${d.result ? `Savings at ${d.result.final_age}: ${gbp(d.result.final_savings)}${d.impact_on_final_savings != null ? ` (${d.impact_on_final_savings >= 0 ? "+" : ""}${gbp(d.impact_on_final_savings)})` : ""}. ` : ""}
       ${d.changes?.length ? `<details><summary>${d.changes.length} change${d.changes.length > 1 ? "s" : ""}</summary><ul>${d.changes.map((c) => `<li>${esc(c.field)}: ${fmt(c.from)} → ${fmt(c.to)}</li>`).join("")}</ul></details>` : ""}</td></tr>`; }).join("")}
   </table></div>`;
+}
+
+// ---------------------------------------------------------------- default assumptions
+async function settingsView() {
+  nav([["#/clients", "Clients", false], ["#/settings", "Default assumptions", true]]);
+  const d = await api("/api/settings");
+  const pctIn = (attr, v) => `<input type="number" step="0.01" ${attr} value="${pct(v)}" style="width:90px">`;
+  function render() {
+    $app.innerHTML = `<h1>Default assumptions</h1>
+    <p class="muted">These are the starting values for new clients and imported fact finds, and for any pot when you pick an ATR, portfolio or product. You can still change them on any plan or pot. Changing them here doesn't alter forecasts you've already saved. Every change is recorded in the audit trail.</p>
+    <div class="grid2">
+      <div class="panel"><h2>Returns by attitude to risk</h2>
+        <table class="edit"><tr><th>ATR</th><th>Assumed return %</th></tr>
+        ${Array.from({ length: 10 }, (_, i) => i + 1).map((k) => `<tr><td>${k}</td><td>${pctIn(`data-atr="${k}"`, d.atr_returns[k])}</td></tr>`).join("")}</table>
+        <div class="row" style="margin-top:10px"><div><label>Default ATR for new clients</label><select id="s_defatr">${atrOptions(d, d.default_atr)}</select></div></div>
+      </div>
+      <div>
+        <div class="panel"><h2>General</h2><div class="row">
+          <div><label>Inflation %</label>${pctIn('id="s_infl"', d.inflation)}</div>
+          <div><label>Plan to age</label><input type="number" id="s_end" value="${d.end_age}" style="width:90px"></div>
+          <div><label>Cash return %</label>${pctIn('id="s_cash"', d.cash_return)}</div>
+          <div><label>Current account return %</label>${pctIn('id="s_cur"', d.current_account_return)}</div></div></div>
+        <div class="panel"><h2>Model portfolios</h2>
+          <table class="edit"><tr><th>Portfolio</th><th>ATR</th><th>Return</th><th></th></tr>
+          ${d.portfolios.map((p, i) => `<tr><td><input data-pn="${i}" value="${esc(p.name)}"></td>
+            <td><select data-pa="${i}" style="min-width:70px">${atrOptions(d, p.atr)}</select></td><td>${pct(d.atr_returns[p.atr])}%</td>
+            <td><button class="small danger" data-pd="${i}">✕</button></td></tr>`).join("")}</table>
+          <p><button class="small ghost" id="addP">+ Add portfolio</button></p></div>
+        <div class="panel"><h2>Fixed-rate products</h2>
+          <p class="muted" style="font-size:12px">These grow at a fixed rate whatever the client's ATR. An imported holding whose name contains the product name uses it automatically.</p>
+          <table class="edit"><tr><th>Product</th><th>Return %</th><th></th></tr>
+          ${Object.entries(d.product_returns).map(([n, r], i) => `<tr><td><input data-xn="${i}" value="${esc(n)}"></td><td>${pctIn(`data-xr="${i}"`, r)}</td>
+            <td><button class="small danger" data-xd="${i}">✕</button></td></tr>`).join("")}</table>
+          <p><button class="small ghost" id="addX">+ Add product</button></p></div>
+        <div class="panel"><h2>Charges and withdrawal tax by pot type</h2>
+          <table class="edit"><tr><th>Type</th><th>Ongoing charges %</th><th>Withdrawal tax %</th></tr>
+          ${["pension", "isa", "gia", "cash", "other"].map((k) => `<tr><td>${POT_LABELS[k]}</td><td>${pctIn(`data-ch="${k}"`, d.charges[k] ?? 0)}</td><td>${pctIn(`data-tx="${k}"`, d.tax[k] ?? 0)}</td></tr>`).join("")}</table></div>
+      </div>
+    </div>
+    <div class="panel"><div class="row"><div style="flex:3"><label>Note for the audit trail</label><input id="s_note" placeholder="What changed and why"></div>
+      <div><button id="s_save">Save defaults</button></div><div><button class="ghost" id="s_reset">Reset to original</button></div></div>
+      <p id="s_msg" class="muted"></p></div>`;
+    const val = (sel) => +document.querySelector(sel).value / 100;
+    function collect() {
+      document.querySelectorAll("[data-atr]").forEach((i) => (d.atr_returns[i.dataset.atr] = +i.value / 100));
+      d.default_atr = +document.getElementById("s_defatr").value;
+      d.inflation = val("#s_infl"); d.end_age = +document.getElementById("s_end").value;
+      d.cash_return = val("#s_cash"); d.current_account_return = val("#s_cur");
+      d.portfolios = d.portfolios.map((p, i) => ({ name: document.querySelector(`[data-pn="${i}"]`).value.trim(), atr: +document.querySelector(`[data-pa="${i}"]`).value })).filter((p) => p.name);
+      const prods = {};
+      Object.keys(d.product_returns).forEach((_, i) => { const n = document.querySelector(`[data-xn="${i}"]`).value.trim(); if (n) prods[n] = val(`[data-xr="${i}"]`); });
+      d.product_returns = prods;
+      document.querySelectorAll("[data-ch]").forEach((i) => (d.charges[i.dataset.ch] = +i.value / 100));
+      document.querySelectorAll("[data-tx]").forEach((i) => (d.tax[i.dataset.tx] = +i.value / 100));
+    }
+    document.querySelectorAll("[data-atr]").forEach((i) => (i.onchange = () => { collect(); render(); }));
+    document.querySelectorAll("[data-pa]").forEach((i) => (i.onchange = () => { collect(); render(); }));
+    document.getElementById("addP").onclick = () => { collect(); d.portfolios.push({ name: "New portfolio", atr: d.default_atr }); render(); };
+    document.getElementById("addX").onclick = () => { collect(); d.product_returns["New product"] = 0; render(); };
+    document.querySelectorAll("[data-pd]").forEach((b) => (b.onclick = () => { collect(); d.portfolios.splice(+b.dataset.pd, 1); render(); }));
+    document.querySelectorAll("[data-xd]").forEach((b) => (b.onclick = () => { collect(); delete d.product_returns[Object.keys(d.product_returns)[+b.dataset.xd]]; render(); }));
+    document.getElementById("s_save").onclick = async () => {
+      collect();
+      try { await api("/api/settings", { body: { defaults: d, note: document.getElementById("s_note").value } }); render(); document.getElementById("s_msg").textContent = "Saved."; }
+      catch (e) { document.getElementById("s_msg").textContent = e.message; }
+    };
+    document.getElementById("s_reset").onclick = async () => {
+      if (!confirm("Reset every default assumption to the original values?")) return;
+      Object.assign(d, await api("/api/settings/reset", { body: {} })); render(); document.getElementById("s_msg").textContent = "Reset to the original defaults.";
+    };
+  }
+  render();
 }
 
 route();

@@ -67,6 +67,11 @@ class Pot:
     charge_rate: float = 0.0  # ongoing charges per year, % of value
     tax_rate: float = 0.0  # flat tax on withdrawals (e.g. 0.2, or 0.15 after 25% tax-free)
     owner: str | None = None
+    # Where the growth assumption came from (for display and the audit trail).
+    # The engine always uses growth_rate; these only record the basis.
+    atr: int | None = None  # attitude to risk, 1-10
+    portfolio: str | None = None  # e.g. a model portfolio name
+    product: str | None = None  # e.g. "Premium Bonds"
 
 
 @dataclass

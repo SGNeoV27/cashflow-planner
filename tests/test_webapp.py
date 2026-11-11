@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from fact_find_import.cashcalc import parse_cashcalc
 from cashflow_engine.serialize import to_dict
-from fact_find_import.to_plan import ImportDefaults
+from cashflow_engine import FirmDefaults
 
 SAMPLE = Path(__file__).parent / "data" / "cashcalc_sample.txt"
 
@@ -37,7 +37,7 @@ def test_import_edit_and_compare(client):
     client.post("/api/unlock", json={"passphrase": "a good passphrase"})
     ff = to_dict(parse_cashcalc(SAMPLE.read_text()))
     r = client.post("/api/import/confirm", json={
-        "fact_find": ff, "defaults": to_dict(ImportDefaults()),
+        "fact_find": ff, "atr": 6,
         "date_of_birth": "1965-01-07", "start_date": "2021-10-19"})
     assert r.status_code == 200, r.text
     cid = r.json()["id"]
@@ -46,6 +46,8 @@ def test_import_edit_and_compare(client):
     assert not any("date of birth" in w for w in info["details"]["warnings"])
 
     plan = client.get(f"/api/clients/{cid}/plans/Baseline").json()["plan"]
+    assert {p["growth_rate"] for p in plan["pots"] if p["type"] == "pension"} == {0.06}  # ATR 6
+    assert plan["assumptions"]["inflation"] == 0.02
     f = client.post("/api/project", json=plan).json()
     assert f["rows"][0]["savings_start"] == pytest.approx(376_300)
 
@@ -61,3 +63,15 @@ def test_import_edit_and_compare(client):
 def test_bad_plan_rejected(client):
     client.post("/api/unlock", json={"passphrase": "a good passphrase"})
     assert client.post("/api/project", json={"client": {}}).status_code == 400
+
+
+def test_settings_edit_and_reset(client):
+    client.post("/api/unlock", json={"passphrase": "a good passphrase"})
+    d = client.get("/api/settings").json()
+    assert d["atr_returns"]["1"] == 0.02 and d["product_returns"] == {"Premium Bonds": 0.0}
+    d["inflation"] = 0.03
+    assert client.post("/api/settings", json={"defaults": d, "note": "test"}).status_code == 200
+    assert client.get("/api/settings").json()["inflation"] == 0.03
+    del d["atr_returns"]["10"]
+    assert client.post("/api/settings", json={"defaults": d}).status_code == 400
+    assert client.post("/api/settings/reset", json={}).json()["inflation"] == 0.02
