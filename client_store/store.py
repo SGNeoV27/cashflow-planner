@@ -12,8 +12,8 @@ from pathlib import Path
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
-from cashflow_engine import Plan, project
-from cashflow_engine.serialize import plan_from_dict, plan_to_dict
+from cashflow_engine import FirmDefaults, Plan, project
+from cashflow_engine.serialize import from_dict, plan_from_dict, plan_to_dict, to_dict
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value BLOB NOT NULL);
@@ -198,6 +198,18 @@ class ClientStore:
         rows = self.db.execute("SELECT DISTINCT name FROM plans WHERE client_id=? ORDER BY name",
                                (client_id,)).fetchall()
         return [r[0] for r in rows]
+
+    # -- firm-wide default assumptions -----------------------------------------
+    def get_defaults(self) -> FirmDefaults:
+        row = self.db.execute("SELECT value FROM meta WHERE key='defaults'").fetchone()
+        return FirmDefaults() if row is None else from_dict(FirmDefaults, self._dec(row[0]))
+
+    def save_defaults(self, defaults: FirmDefaults, note: str = "") -> None:
+        old = to_dict(self.get_defaults())
+        new = to_dict(defaults)
+        self.db.execute("INSERT OR REPLACE INTO meta VALUES ('defaults', ?)", (self._enc(new),))
+        self._audit(None, "default assumptions changed", {"note": note, "changes": diff_plans(old, new)})
+        self.db.commit()
 
     # -- audit --------------------------------------------------------------
     def audit_trail(self, client_id: str | None = None) -> list[AuditEntry]:
