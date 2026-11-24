@@ -312,7 +312,8 @@ def _investments(data: ReportData, st, width):
     pots = data.pot_rows()
     for r in pots:
         charges = pct(r["charges"]) + (f" + {money(r['fixed'])}" if r["fixed"] else "")
-        rows.append([Paragraph(r["name"], st["cell"]), r["type"], money(r["value"]),
+        name = r["name"] + (" <font color='#8A1C3D'>*</font>" if r["managed"] else "")
+        rows.append([Paragraph(name, st["cell"]), r["type"], money(r["value"]),
                      Paragraph(r["basis"], st["cell"]), pct(r["gross"]), charges, pct(r["net"])])
     rows.append(["Total", "", money(sum(r["value"] for r in pots)), "", "", "", ""])
     widths = [w * width for w in (0.2, 0.15, 0.13, 0.22, 0.09, 0.12, 0.09)]
@@ -321,6 +322,9 @@ def _investments(data: ReportData, st, width):
     out = [Paragraph("Your savings and investments", st["h1"]),
            Paragraph("Gross is the assumed return before charges. Net is the return after the percentage charges "
                      "on the account. Any fixed annual fee is taken in addition.", st["body"]), t]
+    if any(r["managed"] for r in pots):
+        out.append(Paragraph("* Managed by us: our ongoing adviser fee applies, and our initial fee if the account is "
+                             "being transferred to us. Other accounts don't pay our fees.", st["small"]))
     ages = [r.age for r in data.forecast.rows]
     series = [(p.name, [r.pots[p.id].closing for r in data.forecast.rows]) for p in data.plan.pots]
     markers = {e["age"]: e["name"] for e in data.event_timeline()}
@@ -438,6 +442,13 @@ def _tax(data: ReportData, st, width):
                      f"from pensions totals <b>{money(t['tax_free_cash'])}</b>. Tax is worked out on all taxable "
                      f"income together, including salary, State Pension, other pensions and rent, so pension "
                      f"withdrawals can fall into a higher band when other income is high.", st["body"])]
+    if t["cgt"]:
+        out.append(Paragraph(
+            f"Selling investments in general investment accounts realises gains totalling "
+            f"<b>{money(sum(r.capital_gains for r in f.rows))}</b> over the plan, with Capital Gains Tax of "
+            f"<b>{money(t['cgt'])}</b>. Each year's gains above the annual exempt amount are taxed at "
+            f"{pct(data.plan.assumptions.tax_rules.cgt_basic_rate, 0)} within the unused basic rate band and "
+            f"{pct(data.plan.assumptions.tax_rules.cgt_higher_rate, 0)} above it.", st["body"]))
     first_tax = next((r for r in f.rows if r.tax_bands), None)
     if first_tax:
         rows = [["Band", "Rate", "Income in band", "Tax"]]
@@ -515,7 +526,8 @@ def _important(st):
         "Actual returns, inflation and tax rules will differ and the value of investments can fall as well as "
         "rise, so the outcome is not guaranteed.",
         "Figures are shown in today's money. Tax is calculated using the current UK income tax rules described in "
-        "the assumptions; National Insurance, Capital Gains Tax, Inheritance Tax and dividend or savings-income "
+        "the assumptions, with Capital Gains Tax on general investment accounts; National Insurance, Inheritance "
+        "Tax and dividend or savings-income "
         "tax rates are not included.",
         "This report should be read together with our advice. Please contact us before acting on it.",
     ]

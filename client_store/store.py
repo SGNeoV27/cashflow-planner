@@ -202,7 +202,11 @@ class ClientStore:
     # -- firm-wide default assumptions -----------------------------------------
     def get_defaults(self) -> FirmDefaults:
         row = self.db.execute("SELECT value FROM meta WHERE key='defaults'").fetchone()
-        return FirmDefaults() if row is None else from_dict(FirmDefaults, self._dec(row[0]))
+        if row is None:
+            return FirmDefaults()
+        data = self._dec(row[0])
+        data.setdefault("version", 1)
+        return from_dict(FirmDefaults, data).upgrade()
 
     def save_defaults(self, defaults: FirmDefaults, note: str = "") -> None:
         old = to_dict(self.get_defaults())

@@ -40,7 +40,7 @@ from dataclasses import dataclass, field
 from datetime import date
 
 from .models import Charge, Frequency, Plan, Pot, PotType
-from .tax import income_tax
+from .tax import capital_gains_tax, income_tax
 
 
 @dataclass
@@ -55,6 +55,8 @@ class PotYear:
     tax_free: float = 0.0  # tax-free cash paid out
     taxable: float = 0.0  # taxable pension income paid out
     tax: float = 0.0  # tax on this pot's withdrawals
+    gains: float = 0.0  # capital gains realised (CGT pots)
+    cost_basis: float = 0.0  # base cost at the end of the year (CGT pots)
     surplus_saved: float = 0.0
     growth: float = 0.0
     closing: float = 0.0
@@ -81,6 +83,8 @@ class YearRow:
     income_tax: float = 0.0
     taxable_income: float = 0.0
     tax_free_cash: float = 0.0
+    capital_gains: float = 0.0
+    cgt: float = 0.0
     event_costs: float = 0.0
     events: list[dict] = field(default_factory=list)
     tax_bands: list = field(default_factory=list)
@@ -128,6 +132,7 @@ class Forecast:
             "tax": sum(r.tax_paid for r in self.rows),
             "income_tax": sum(r.income_tax for r in self.rows),
             "tax_free_cash": sum(r.tax_free_cash for r in self.rows),
+            "cgt": sum(r.cgt for r in self.rows),
             "events": sum(r.event_costs for r in self.rows),
         }
 
@@ -173,10 +178,11 @@ def gross_growth(pot: Pot, plan: Plan) -> float:
     return pot.growth_rate
 
 
+INITIAL_FEE = "Initial fee (transfer)"
+
+
 def _charges(pot: Pot) -> list[Charge]:
-    if pot.charges:
-        return pot.charges
-    return [Charge("other", rate=pot.charge_rate, name="Ongoing charges")] if pot.charge_rate else []
+    return pot.active_charges()
 
 
 def project(plan: Plan) -> Forecast:
@@ -190,6 +196,8 @@ def project(plan: Plan) -> Forecast:
     pots: dict[str, Pot] = {p.id: p for p in plan.pots}
     bal: dict[str, float] = {p.id: float(p.value) for p in plan.pots}
     cryst: dict[str, float] = {p.id: min(float(p.crystallised), float(p.value)) for p in plan.pots}
+    # Base cost for CGT. It is a cash amount, so it shrinks in today's terms each year.
+    base: dict[str, float] = {p.id: float(p.value if p.cost_basis is None else p.cost_basis) for p in plan.pots}
     rates = {pid: gross_growth(p, plan) for pid, p in pots.items()}
     overdraft = 0.0
     lsa_left = rules.lump_sum_allowance  # today's terms; shrinks with inflation as it is frozen
@@ -222,8 +230,13 @@ def project(plan: Plan) -> Forecast:
         for pid, pot in pots.items():
             if bal[pid] <= 0:
                 continue
+            if age == start_age and pot.initial_charge() > 0:
+                amt = min(pys[pid].opening * pot.initial_charge(), bal[pid])
+                scale_pot(pid, bal[pid] - amt)
+                pys[pid].charges += amt
+                pys[pid].charges_by_type[INITIAL_FEE] = amt
             for c in _charges(pot):
-                amt = min(pys[pid].opening * c.rate * f + c.amount * f, bal[pid])
+                amt = min(c.percent_on(pys[pid].opening) * f + c.amount * f, bal[pid])
                 if amt <= 0:
                     continue
                 scale_pot(pid, bal[pid] - amt)
@@ -259,6 +272,7 @@ def project(plan: Plan) -> Forecast:
             amt = amount(c)
             if amt:
                 bal[c.pot_id] += amt
+                base[c.pot_id] += amt
                 pys[c.pot_id].contributions += amt
                 contributions += amt
                 if not c.external:
@@ -275,6 +289,16 @@ def project(plan: Plan) -> Forecast:
         tax_state = {"taxable": taxable_income,
                      "tax": income_tax(taxable_income, rules, scottish, tax_scale).total if taxable_income else 0.0}
         tax_on_income = tax_state["tax"]
+        # CGT is worked out on the gains so far this year, on top of the taxable
+        # income known at the time of each sale.
+        gains_state = {"gains": 0.0, "cgt": 0.0}
+
+        def cgt_extra(extra_gain: float) -> float:
+            total = capital_gains_tax(gains_state["gains"] + extra_gain, tax_state["taxable"], rules, tax_scale)
+            return max(0.0, total - gains_state["cgt"])
+
+        def gain_share(pid: str) -> float:
+            return 1 - base[pid] / bal[pid] if bal[pid] > 0 else 0.0
 
         def pension_split(pid: str, gross: float, how: str) -> tuple[float, float, float, float]:
             """(tax_free, taxable, from_uncrystallised, newly_crystallised_kept) for taking ``gross``."""
@@ -315,7 +339,31 @@ def project(plan: Plan) -> Forecast:
             if want <= 0 or bal[pid] <= 0.005:
                 return 0.0
             uk = pot.tax_mode == "uk" and pot.type == PotType.PENSION
-            if not uk:
+            if pot.tax_mode == "cgt" and pot.type != PotType.PENSION:
+                share = gain_share(pid)
+                gross = min(want, bal[pid])
+                if basis == "net":
+                    if bal[pid] - cgt_extra(bal[pid] * share) <= want:
+                        gross = bal[pid]
+                    else:
+                        lo, hi = 0.0, bal[pid]
+                        for _ in range(60):
+                            mid = (lo + hi) / 2
+                            if mid - cgt_extra(mid * share) < want:
+                                lo = mid
+                            else:
+                                hi = mid
+                        gross = hi
+                gain = gross * share
+                tax = cgt_extra(gain)
+                gains_state["gains"] += gain
+                gains_state["cgt"] += tax
+                base[pid] -= base[pid] * gross / bal[pid]
+                scale_pot(pid, bal[pid] - gross)
+                net = gross - tax
+                py.tax += tax
+                py.gains += gain
+            elif not uk:
                 rate = pot.tax_rate
                 gross = min(want / (1 - rate) if basis == "net" else want, bal[pid])
                 scale_pot(pid, bal[pid] - gross)
@@ -424,6 +472,10 @@ def project(plan: Plan) -> Forecast:
             pys[pid].growth = g
             pys[pid].closing = bal[pid]
             pys[pid].crystallised = cryst[pid]
+            if bal[pid] <= 0.005:
+                base[pid] = 0.0
+            base[pid] /= (1 + infl) ** f
+            pys[pid].cost_basis = base[pid]
         overdraft *= 1 + _real(a.overdraft_rate, infl, method) * f
 
         flat_tax = sum(py.tax for py in pys.values()) - (tax_state["tax"] - tax_on_income)
@@ -448,6 +500,8 @@ def project(plan: Plan) -> Forecast:
                 income_tax=tax_state["tax"],
                 taxable_income=tax_state["taxable"],
                 tax_free_cash=sum(py.tax_free for py in pys.values()),
+                capital_gains=gains_state["gains"],
+                cgt=gains_state["cgt"],
                 event_costs=event_costs,
                 events=events,
                 tax_bands=breakdown.bands if breakdown else [],

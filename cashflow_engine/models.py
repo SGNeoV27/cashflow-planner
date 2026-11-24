@@ -62,24 +62,62 @@ CHARGE_KINDS = {
     "fmc": "Fund management charge (FMC/OCF)",
     "platform": "Platform charge",
     "dfm": "Discretionary fund management (DFM)",
+    "transaction": "Transaction costs",
     "adviser": "Ongoing adviser charge",
     "other": "Other ongoing charge",
     "fixed": "Fixed annual fee",
 }
 
 
+# Charges that the firm takes, so they only apply to products the firm manages.
+FIRM_CHARGE_KINDS = {"adviser"}
+
+
 @dataclass
 class Charge:
-    """One ongoing charge on a pot: a % of the pot's value, or a fixed £ a year."""
+    """One ongoing charge on a pot: a % of the pot's value, or a fixed £ a year.
+
+    A charge can instead be tiered by value (``tiers``), as many platforms are.
+    Each tier is ``[upper, rate]`` with the upper limit in £ (today's money) and
+    ``None`` for the top tier. With ``tier_basis`` "banded" each slice of the
+    value pays its own tier's rate; with "whole" the whole value pays the rate
+    of the tier it falls in.
+    """
 
     kind: str  # one of CHARGE_KINDS
     rate: float = 0.0  # % of value per year
     amount: float = 0.0  # fixed £ per year, today's terms (rises with inflation)
     name: str | None = None
+    tiers: list[list] | None = None  # [[upper £ or None, rate], ...]
+    tier_basis: str = "banded"  # "banded" | "whole"
 
     @property
     def label(self) -> str:
         return self.name or CHARGE_KINDS.get(self.kind, self.kind)
+
+    def percent_on(self, value: float) -> float:
+        """The charge as £ a year on ``value``, excluding any fixed amount."""
+        if not self.tiers:
+            return value * self.rate
+        if self.tier_basis == "whole":
+            for upper, rate in self.tiers:
+                if upper is None or value <= upper:
+                    return value * rate
+            return value * self.tiers[-1][1]
+        total, lower = 0.0, 0.0
+        for upper, rate in self.tiers:
+            top = value if upper is None else min(value, upper)
+            if top > lower:
+                total += (top - lower) * rate
+            if upper is None or value <= upper:
+                break
+            lower = upper
+        return total
+
+    def effective_rate(self, value: float) -> float:
+        if not self.tiers:
+            return self.rate
+        return self.percent_on(value) / value if value > 0 else self.tiers[0][1]
 
 
 @dataclass
@@ -109,9 +147,28 @@ class Pot:
     tax_mode: str = "flat"
     withdrawal_method: str = "ufpls"  # pensions: "ufpls" | "drawdown" | "tax_free_cash"
     crystallised: float = 0.0  # pensions: part of the value already crystallised
+    # Products the firm manages. Only these pay the firm's ongoing adviser fee
+    # and, when transferred in, the initial fee.
+    managed: bool = False
+    transfer: bool = False  # being transferred in (initial fee applies if managed)
+    initial_fee: float = 0.0  # one-off % of the value, taken at the start of the plan
+    # General investment accounts: "cgt" taxes gains on withdrawals. The base
+    # cost is what was paid in (None = same as today's value, so no gain yet).
+    cost_basis: float | None = None
 
-    def percent_charges(self) -> float:
-        return sum(c.rate for c in self.charges) if self.charges else self.charge_rate
+    def active_charges(self) -> list[Charge]:
+        """Ongoing charges that apply: the firm's own only on managed products."""
+        items = self.charges or ([Charge("other", rate=self.charge_rate, name="Ongoing charges")]
+                                 if self.charge_rate else [])
+        return [c for c in items if self.managed or c.kind not in FIRM_CHARGE_KINDS]
+
+    def percent_charges(self, value: float | None = None) -> float:
+        """Total % charges a year, at ``value`` (default: today's value) for tiered charges."""
+        v = self.value if value is None else value
+        return sum(c.effective_rate(v) for c in self.active_charges())
+
+    def initial_charge(self) -> float:
+        return self.initial_fee if (self.managed and self.transfer) else 0.0
 
 
 @dataclass

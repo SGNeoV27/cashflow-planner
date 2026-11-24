@@ -53,7 +53,7 @@ def render_xlsx(data: ReportData) -> bytes:
            [("Measure", None, 38), ("Value", None, 24)], [list(kv) for kv in data.key_figures()] + [
                ["Charges impact on final savings", round(data.charges_impact())],
                ["Prepared", f"{data.prepared:%d/%m/%Y}"]])
-    wb["Summary"]["B11"].number_format = MONEY
+    wb["Summary"].cell(row=4 + len(data.key_figures()), column=2).number_format = MONEY
 
     a = p.assumptions
     _sheet(wb, "Assumptions", "Assumptions", [("Assumption", None, 34), ("Value", None, 40)], [
@@ -69,9 +69,9 @@ def render_xlsx(data: ReportData) -> bytes:
     _sheet(wb, "Accounts", "Savings and investments", [
         ("Account", None, 26), ("Type", None, 22), ("Value today", MONEY, 14), ("Return basis", None, 34),
         ("Gross return", PCT, 12), ("% charges", PCT, 12), ("Net return", PCT, 12), ("Fixed fees £", MONEY, 12),
-        ("Runs out at age", None, 14)],
+        ("Runs out at age", None, 14), ("Managed by us", None, 13)],
         [[r["name"], r["type"], r["value"], r["basis"], r["gross"], r["charges"], r["net"], r["fixed"],
-          r["runs_out"] or "Never"] for r in data.pot_rows()])
+          r["runs_out"] or "Never", "Yes" if r["managed"] else "No"] for r in data.pot_rows()])
 
     _sheet(wb, "Charges", "Charges", [
         ("Account", None, 26), ("Charge", None, 36), ("Rate", None, 10), ("Fixed fee", None, 12),
@@ -93,7 +93,7 @@ def render_xlsx(data: ReportData) -> bytes:
             ("Income (gross)", MONEY, 14), ("Scheduled withdrawals (net)", MONEY, 15),
             ("Drawn for spending (net)", MONEY, 15), ("Spending", MONEY, 13), ("Life events", MONEY, 13),
             ("Contributions", MONEY, 13), ("Charges", MONEY, 12), ("Taxable income", MONEY, 14),
-            ("Income tax", MONEY, 12), ("All tax", MONEY, 12), ("Tax-free cash", MONEY, 13),
+            ("Income tax", MONEY, 12), ("Capital gains", MONEY, 13), ("CGT", MONEY, 11), ("All tax", MONEY, 12), ("Tax-free cash", MONEY, 13),
             ("Surplus / deficit", MONEY, 14), ("Unfunded shortfall", MONEY, 14), ("Overdraft", MONEY, 12),
             ("Savings at end", MONEY, 15)]
     pot_cols = [(f"{pt.name} at end", MONEY, 16) for pt in p.pots]
@@ -101,7 +101,7 @@ def render_xlsx(data: ReportData) -> bytes:
     for r in f.rows:
         rows.append([r.year, r.age, r.fraction, r.savings_start, r.total_income, r.net_withdrawals,
                      r.drawn_for_shortfall_net, r.total_expenses - r.event_costs, r.event_costs,
-                     r.total_contributions, r.total_charges, r.taxable_income, r.income_tax, r.tax_paid,
+                     r.total_contributions, r.total_charges, r.taxable_income, r.income_tax, r.capital_gains, r.cgt, r.tax_paid,
                      r.tax_free_cash, r.surplus_deficit, r.unfunded_shortfall, r.overdraft, r.savings_end]
                     + [r.pots[pt.id].closing for pt in p.pots])
     _sheet(wb, "Year by year", "Year-by-year cashflow (today's money)", cols + pot_cols, rows)
@@ -112,12 +112,12 @@ def render_xlsx(data: ReportData) -> bytes:
             py = r.pots[pt.id]
             pot_detail.append([r.year, r.age, pt.name, py.opening, py.charges, py.contributions,
                                py.withdrawals_gross, py.events_gross, py.drawn_for_shortfall_gross, py.tax_free,
-                               py.taxable, py.tax, py.growth, py.closing])
+                               py.taxable, py.tax, py.gains, py.growth, py.closing])
     _sheet(wb, "Account detail", "Each account year by year", [
         ("Year", None, 8), ("Age", None, 6), ("Account", None, 24), ("Opening", MONEY, 14), ("Charges", MONEY, 12),
         ("Contributions", MONEY, 13), ("Scheduled withdrawals (gross)", MONEY, 15), ("Life events", MONEY, 12),
         ("Drawn for spending (gross)", MONEY, 15), ("Tax-free", MONEY, 12), ("Taxable", MONEY, 12),
-        ("Tax", MONEY, 12), ("Growth", MONEY, 12), ("Closing", MONEY, 14)], pot_detail)
+        ("Tax", MONEY, 12), ("Gains", MONEY, 12), ("Growth", MONEY, 12), ("Closing", MONEY, 14)], pot_detail)
 
     if data.scenarios:
         _sheet(wb, "Scenarios", "Scenario comparison", [

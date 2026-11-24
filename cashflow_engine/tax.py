@@ -4,8 +4,10 @@ The rules are plain data (``TaxRules``) so they can be changed for a new tax
 year and are saved with every forecast. The default figures are for the
 2026/27 tax year. Please check them against HMRC before relying on them.
 
+Capital Gains Tax is modelled for general investment accounts (see the engine).
+
 Not modelled: National Insurance, dividend and savings-income rates, the
-personal savings allowance, Marriage Allowance, Capital Gains Tax.
+personal savings allowance, Marriage Allowance.
 """
 
 from __future__ import annotations
@@ -49,6 +51,10 @@ class TaxRules:
     # Pension lump sum allowance (tax-free cash cap), frozen in cash terms.
     lump_sum_allowance: float = 268_275
     tax_free_share: float = 0.25  # share of a crystallisation that can be taken tax-free
+    # Capital Gains Tax (UK-wide rates, also for Scottish taxpayers).
+    cgt_annual_exempt: float = 3_000
+    cgt_basic_rate: float = 0.18  # on gains within the unused basic rate band
+    cgt_higher_rate: float = 0.24
 
 
 @dataclass
@@ -84,3 +90,17 @@ def income_tax(income: float, rules: TaxRules, scottish: bool = False, scale: fl
         if remaining <= 0:
             break
     return TaxBreakdown(taxable_income=income, personal_allowance=pa, bands=rows, total=total)
+
+
+def capital_gains_tax(gains: float, taxable_income: float, rules: TaxRules, scale: float = 1.0) -> float:
+    """CGT on a year's gains, added on top of the year's taxable income.
+
+    Gains above the annual exempt amount are taxed at the basic rate while they
+    fit in the unused basic rate band, and at the higher rate above it.
+    """
+    taxable = max(0.0, gains - rules.cgt_annual_exempt * scale)
+    if taxable <= 0:
+        return 0.0
+    band_top = (rules.personal_allowance + rules.bands[0].upper) * scale
+    basic = min(taxable, max(0.0, band_top - taxable_income))
+    return basic * rules.cgt_basic_rate + (taxable - basic) * rules.cgt_higher_rate
