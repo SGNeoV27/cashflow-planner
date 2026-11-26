@@ -31,6 +31,7 @@ class FFItem:
     priority: str | None = None  # essential | discretionary
     timeframe: str | None = None  # as written in the source
     net: bool | None = None
+    kind: str | None = None  # incomes: employment | state_pension | db_pension | rental | other ...
 
 
 @dataclass

@@ -13,6 +13,7 @@ from datetime import date
 from cashflow_engine import Assumptions, Expense, FirmDefaults, Frequency, Income, Person, Plan, Pot, PotType
 
 from .factfind import FactFind
+from .text import month_year
 
 KIND_TO_POT = {
     "pension": PotType.PENSION, "isa": PotType.ISA, "gia": PotType.GIA,
@@ -71,10 +72,35 @@ def to_plan(ff: FactFind, start_date: date, date_of_birth: date | None = None,
             withdrawal_method=d.pension_withdrawal_method,
             platform=d.default_platform if invested else None))
 
+    def until(item):
+        """'Until December 2026' ends the item at the end of that month."""
+        t = (item.timeframe or "").strip()
+        end = month_year(t) if t.lower().startswith("until") else None
+        if end is None:
+            return None
+        return date(end.year + (end.month == 12), end.month % 12 + 1, 1)
+
+    def current(items, what):
+        """Leave out items whose end date has already passed, with a warning."""
+        out = []
+        for i in items:
+            end = until(i)
+            if end is not None and end <= start_date:
+                ff.warn(f"{what}: {i.name} ended ({i.timeframe}) before the forecast starts, so it was left out")
+                continue
+            out.append(i)
+        return out
+
     expenses = [Expense(e.name, e.amount, Frequency(e.frequency), start_age=start_age,
-                        category=e.priority or e.category) for e in ff.expenses]
-    incomes = [Income(i.name, i.amount, Frequency(i.frequency), start_age=start_age,
-                      category=i.category) for i in ff.incomes]
+                        category=e.priority or e.category, end_date=until(e))
+                for e in current(ff.expenses, "Expenses")]
+    # Gross pension, employment and rental income is taxable; amounts given net are
+    # already after tax, so they aren't taxed again.
+    taxable_kinds = {"employment", "self_employment", "state_pension", "db_pension", "rental"}
+    incomes = [Income(i.name, i.amount, Frequency(i.frequency), start_age=start_age, category=i.category,
+                      end_date=until(i), kind=i.kind or "other",
+                      taxable=(i.net is False and (i.kind or "other") in taxable_kinds))
+               for i in current(ff.incomes, "Incomes")]
 
     rank = {k: n for n, k in enumerate(d.withdrawal_order)}
     order = [p.id for p in sorted(pots, key=lambda p: rank.get(p.type.value, 99))]
