@@ -53,6 +53,27 @@ def to_plan(ff: FactFind, start_date: date, date_of_birth: date | None = None,
         raise ValueError(f"A date of birth is needed for {main.name}")
     start_age = start_date.year - dob.year - ((start_date.month, start_date.day) < (dob.month, dob.day))
 
+    others = [c for c in ff.clients[1:] if c.date_of_birth]
+    partner_first = others[0].name.split()[0].lower() if others and others[0].name.split() else None
+
+    def role(owner: str | None) -> str | None:
+        """CashCalc gives owners as first names or "Joint"; the plan uses client/partner/joint."""
+        if not owner or not others:
+            return None
+        o = owner.strip().lower()
+        if o == "joint":
+            return "joint"
+        if o == partner_first or o == others[0].name.lower():
+            return "partner"
+        return "client"
+
+    def age_at_start(who_dob: date) -> int:
+        return start_date.year - who_dob.year - ((start_date.month, start_date.day) < (who_dob.month, who_dob.day))
+
+    def start_for(owner: str | None) -> int:
+        """A partner's items are timed by the partner's age, so they start at the partner's age today."""
+        return age_at_start(others[0].date_of_birth) if role(owner) == "partner" else start_age
+
     used: set[str] = {"current"}
     pots = [Pot("current", "Current account", PotType.CURRENT_ACCOUNT, 0.0,
                 growth_rate=d.current_account_return)]
@@ -66,7 +87,7 @@ def to_plan(ff: FactFind, start_date: date, date_of_birth: date | None = None,
         pots.append(Pot(
             id=_slug(h.name, used), name=h.name, type=KIND_TO_POT[kind], value=h.value,
             growth_rate=d.growth_for(kind, atr=atr if invested else None, product=product),
-            charges=d.charges_for(kind), tax_rate=d.tax.get(kind, 0.0), owner=h.owner,
+            charges=d.charges_for(kind), tax_rate=d.tax.get(kind, 0.0), owner=role(h.owner),
             atr=atr if invested else None, product=product,
             tax_mode=d.pension_tax_mode if pension else (d.gia_tax_mode if kind == "gia" else "flat"),
             withdrawal_method=d.pension_withdrawal_method,
@@ -91,14 +112,14 @@ def to_plan(ff: FactFind, start_date: date, date_of_birth: date | None = None,
             out.append(i)
         return out
 
-    expenses = [Expense(e.name, e.amount, Frequency(e.frequency), start_age=start_age,
-                        category=e.priority or e.category, end_date=until(e))
+    expenses = [Expense(e.name, e.amount, Frequency(e.frequency), start_age=start_for(e.owner),
+                        category=e.priority or e.category, end_date=until(e), owner=role(e.owner))
                 for e in current(ff.expenses, "Expenses")]
     # Gross pension, employment and rental income is taxable; amounts given net are
     # already after tax, so they aren't taxed again.
     taxable_kinds = {"employment", "self_employment", "state_pension", "db_pension", "rental"}
-    incomes = [Income(i.name, i.amount, Frequency(i.frequency), start_age=start_age, category=i.category,
-                      end_date=until(i), kind=i.kind or "other",
+    incomes = [Income(i.name, i.amount, Frequency(i.frequency), start_age=start_for(i.owner), category=i.category,
+                      end_date=until(i), kind=i.kind or "other", owner=role(i.owner),
                       taxable=(i.net is False and (i.kind or "other") in taxable_kinds))
                for i in current(ff.incomes, "Incomes")]
 
@@ -106,8 +127,8 @@ def to_plan(ff: FactFind, start_date: date, date_of_birth: date | None = None,
     order = [p.id for p in sorted(pots, key=lambda p: rank.get(p.type.value, 99))]
 
     partner = None
-    if len(ff.clients) > 1 and ff.clients[1].date_of_birth:
-        p2 = ff.clients[1]
+    if others:
+        p2 = others[0]
         partner = Person(p2.name, p2.date_of_birth, p2.retirement_age, p2.state_pension_age)
 
     return Plan(

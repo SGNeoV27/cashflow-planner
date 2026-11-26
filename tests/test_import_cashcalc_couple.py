@@ -73,3 +73,22 @@ def test_plan_from_couple_fact_find(ff):
     mortgage = next(e for e in plan.expenses if e.name.startswith("Mortgage"))
     assert mortgage.end_date == date(2027, 7, 1)
     assert project(plan).rows
+
+
+def test_owners_map_to_client_partner_or_joint(ff):
+    plan = to_plan(ff, date(2026, 11, 26))
+    assert {i.name: i.owner for i in plan.incomes}["State pension"] == "partner"
+    assert {i.name: i.owner for i in plan.incomes}["Salary"] == "client"
+    pots = {p.name: p.owner for p in plan.pots}
+    assert pots["Example Life Investment bond"] == "joint"
+    assert pots["NS&I premium bonds"] == "partner"
+    assert pots["Example Funds AIM isa"] == "client"
+    assert {e.name: e.owner for e in plan.expenses}["Credit Cards"] == "joint"
+    # Jo's items are timed by Jo's age (84 at the start), so they are paid from the first year.
+    assert {i.name: i.start_age for i in plan.incomes}["State pension"] == 84
+    assert {i.name: i.start_age for i in plan.incomes}["Salary"] == 86
+    row = project(plan).rows[0]
+    jo_income = 900 + 120 * 52
+    assert row.total_income == pytest.approx((20_000 + 30_000 + 9_000 + jo_income) * row.fraction, rel=1e-3)
+    assert set(row.tax_by_person) == {"client", "partner"}
+    assert row.income_tax == pytest.approx(sum(p["income_tax"] for p in row.tax_by_person.values()))

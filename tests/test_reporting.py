@@ -130,3 +130,24 @@ def test_platform_charges_in_report(data):
     assert plat["year1"] > 0 and plat["rate"].startswith("Tiered")
     assert ("Stocks and shares ISA", "Platform wrapper fee (Transact)") in rows
     assert sum(r["total"] for r in data.charge_rows()) == pytest.approx(data.forecast.totals()["charges"])
+
+
+def test_couple_report_shows_household_and_each_persons_tax():
+    plan = sample_plan()
+    plan.partner = Person("Sam Partner", date(1966, 2, 1), retirement_age=65)
+    plan.incomes.append(Income("Sam salary", 40_000, start_age=62, end_age=64, taxable=True, kind="employment",
+                               owner="partner"))
+    plan.pots[1].owner = "joint"
+    data = build(plan, prepared=date(2026, 11, 11))
+    r0 = data.forecast.rows[0]
+    assert set(r0.tax_by_person) == {"client", "partner"}
+    assert r0.income_tax == pytest.approx(sum(p["income_tax"] for p in r0.tax_by_person.values()))
+    text = "\n".join(p.extract_text() for p in PdfReader(BytesIO(render_pdf(data))).pages)
+    assert "Household income tax" in text and "Sam's tax" in text
+    assert money(r0.tax_by_person["partner"]["income_tax"]) in text
+    ws = load_workbook(BytesIO(render_xlsx(data)))["Year by year"]
+    header = [c.value for c in ws[3]]
+    assert "Sam Partner income tax" in header
+    col = header.index("Sam Partner income tax")
+    row = next(r for r in ws.iter_rows(values_only=True) if r[0] == r0.year)
+    assert row[col] == pytest.approx(r0.tax_by_person["partner"]["income_tax"])

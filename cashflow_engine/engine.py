@@ -39,7 +39,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date
 
-from .models import Charge, Frequency, Plan, Pot, PotType
+from .models import Charge, Frequency, Plan, Pot, PotType, owner_role
 from .platforms import default_platforms, platform_charges
 from .tax import capital_gains_tax, income_tax
 
@@ -88,7 +88,9 @@ class YearRow:
     cgt: float = 0.0
     event_costs: float = 0.0
     events: list[dict] = field(default_factory=list)
-    tax_bands: list = field(default_factory=list)
+    tax_bands: list = field(default_factory=list)  # the client's bands
+    # Each person's own tax: {"client": {...}, "partner": {...}}.
+    tax_by_person: dict[str, dict] = field(default_factory=dict)
     pots: dict[str, PotYear] = field(default_factory=dict)
 
 
@@ -200,7 +202,6 @@ def project(plan: Plan) -> Forecast:
     infl = a.inflation
     method = a.real_rate_method
     dob = plan.client.date_of_birth
-    scottish = plan.client.scottish_taxpayer
 
     pots: dict[str, Pot] = {p.id: p for p in plan.pots}
     bal: dict[str, float] = {p.id: float(p.value) for p in plan.pots}
@@ -210,7 +211,22 @@ def project(plan: Plan) -> Forecast:
     rates = {pid: gross_growth(p, plan) for pid, p in pots.items()}
     platforms = plan_platforms(plan)
     overdraft = 0.0
-    lsa_left = rules.lump_sum_allowance  # today's terms; shrinks with inflation as it is frozen
+    # Each person has their own tax; joint items are split equally between them.
+    people = {"client": plan.client, **({"partner": plan.partner} if plan.partner else {})}
+    scot = {who: getattr(p, "scottish_taxpayer", False) for who, p in people.items()}
+
+    def shares(owner) -> dict[str, float]:
+        r = owner_role(owner, plan)
+        if r == "joint":
+            return {"client": 0.5, "partner": 0.5} if plan.partner else {"client": 1.0}
+        return {r: 1.0}
+
+    def pension_owner(pot: Pot) -> str:
+        r = owner_role(pot.owner, plan)
+        return "client" if r == "joint" else r
+
+    # Lump sum allowance, per person, in today's terms; it shrinks with inflation as it is frozen.
+    lsa_left = {who: rules.lump_sum_allowance for who in people}
     start_age = age_on(dob, plan.start_date)
     f0 = first_year_fraction(dob, plan.start_date)
     unfreeze = max(0.0, (date(rules.frozen_until, 4, 6) - plan.start_date).days / 365.25)
@@ -276,7 +292,10 @@ def project(plan: Plan) -> Forecast:
                 lo = max(ys, item.start_date) if item.start_date else ys
                 hi = min(ye, item.end_date) if item.end_date else ye
                 return max(0, (hi - lo).days) / 365 if hi > lo else 0.0
-            if not item.active(age):
+            item_age = age
+            if plan.partner and owner_role(getattr(item, "owner", None), plan) == "partner":
+                item_age = age_on(plan.partner.date_of_birth, ys)
+            if not item.active(item_age):
                 return 0.0
             return 1.0 if item.frequency == Frequency.ONE_OFF else f
 
@@ -298,22 +317,33 @@ def project(plan: Plan) -> Forecast:
 
         # 3. Income and income tax on it.
         income = 0.0
-        taxable_income = 0.0
+        taxable = {who: 0.0 for who in people}
         for i in plan.incomes:
             amt = amount(i)
             income += amt
             if i.taxable:
-                taxable_income += amt
-        tax_state = {"taxable": taxable_income,
-                     "tax": income_tax(taxable_income, rules, scottish, tax_scale).total if taxable_income else 0.0}
-        tax_on_income = tax_state["tax"]
-        # CGT is worked out on the gains so far this year, on top of the taxable
-        # income known at the time of each sale.
-        gains_state = {"gains": 0.0, "cgt": 0.0}
+                for who, sh in shares(i.owner).items():
+                    taxable[who] += amt * sh
 
-        def cgt_extra(extra_gain: float) -> float:
-            total = capital_gains_tax(gains_state["gains"] + extra_gain, tax_state["taxable"], rules, tax_scale)
-            return max(0.0, total - gains_state["cgt"])
+        def tax_for(who: str, income_: float) -> float:
+            return income_tax(income_, rules, scot[who], tax_scale).total if income_ else 0.0
+
+        ts = {who: {"taxable": taxable[who], "tax": tax_for(who, taxable[who])} for who in people}
+        tax_on_income = sum(t["tax"] for t in ts.values())
+        # CGT is worked out on each person's gains so far this year, on top of
+        # their taxable income known at the time of each sale.
+        gs = {who: {"gains": 0.0, "cgt": 0.0} for who in people}
+        tfc_by = {who: 0.0 for who in people}
+
+        def cgt_parts(extra_gain: float, owner) -> dict[str, float]:
+            out = {}
+            for who, sh in shares(owner).items():
+                total = capital_gains_tax(gs[who]["gains"] + extra_gain * sh, ts[who]["taxable"], rules, tax_scale)
+                out[who] = max(0.0, total - gs[who]["cgt"])
+            return out
+
+        def cgt_extra(extra_gain: float, owner) -> float:
+            return sum(cgt_parts(extra_gain, owner).values())
 
         def gain_share(pid: str) -> float:
             return 1 - base[pid] / bal[pid] if bal[pid] > 0 else 0.0
@@ -324,7 +354,7 @@ def project(plan: Plan) -> Forecast:
             c = cryst[pid]
             share = rules.tax_free_share
             if how == "tax_free_cash":
-                tfc = max(0.0, min(gross, u * share, lsa_left))
+                tfc = max(0.0, min(gross, u * share, lsa_left[pension_owner(pots[pid])]))
                 return tfc, 0.0, tfc, tfc / share - tfc if share else 0.0
             tax_free = taxable = from_u = 0.0
             rest = gross
@@ -333,7 +363,7 @@ def project(plan: Plan) -> Forecast:
                 taxable += x
                 rest -= x
             y = min(rest, u)
-            tf = max(0.0, min(y * share, lsa_left))
+            tf = max(0.0, min(y * share, lsa_left[pension_owner(pots[pid])]))
             tax_free += tf
             taxable += y - tf
             from_u += y
@@ -345,13 +375,12 @@ def project(plan: Plan) -> Forecast:
 
         def uk_net(pid: str, gross: float, how: str) -> float:
             tf, tx, _, _ = pension_split(pid, gross, how)
-            base = tax_state["taxable"]
-            extra = income_tax(base + tx, rules, scottish, tax_scale).total - tax_state["tax"] if tx else 0.0
+            who = pension_owner(pots[pid])
+            extra = tax_for(who, ts[who]["taxable"] + tx) - ts[who]["tax"] if tx else 0.0
             return tf + tx - extra
 
         def take(pid: str, want: float, basis: str, how: str | None, kind: str) -> float:
             """Take from a pot. ``want`` is net or gross per ``basis``. Returns the net received."""
-            nonlocal lsa_left
             pot = pots[pid]
             py = pys[pid]
             if want <= 0 or bal[pid] <= 0.005:
@@ -361,21 +390,23 @@ def project(plan: Plan) -> Forecast:
                 share = gain_share(pid)
                 gross = min(want, bal[pid])
                 if basis == "net":
-                    if bal[pid] - cgt_extra(bal[pid] * share) <= want:
+                    if bal[pid] - cgt_extra(bal[pid] * share, pot.owner) <= want:
                         gross = bal[pid]
                     else:
                         lo, hi = 0.0, bal[pid]
                         for _ in range(60):
                             mid = (lo + hi) / 2
-                            if mid - cgt_extra(mid * share) < want:
+                            if mid - cgt_extra(mid * share, pot.owner) < want:
                                 lo = mid
                             else:
                                 hi = mid
                         gross = hi
                 gain = gross * share
-                tax = cgt_extra(gain)
-                gains_state["gains"] += gain
-                gains_state["cgt"] += tax
+                parts = cgt_parts(gain, pot.owner)
+                tax = sum(parts.values())
+                for who, sh in shares(pot.owner).items():
+                    gs[who]["gains"] += gain * sh
+                    gs[who]["cgt"] += parts[who]
                 base[pid] -= base[pid] * gross / bal[pid]
                 scale_pot(pid, bal[pid] - gross)
                 net = gross - tax
@@ -412,16 +443,18 @@ def project(plan: Plan) -> Forecast:
                     gross = tf
                     kept = min(kept, bal[pid] - cryst[pid] - tf)
                 extra = 0.0
+                who = pension_owner(pot)
                 if tx:
-                    new_tax = income_tax(tax_state["taxable"] + tx, rules, scottish, tax_scale).total
-                    extra = new_tax - tax_state["tax"]
-                    tax_state["taxable"] += tx
-                    tax_state["tax"] = new_tax
+                    new_tax = tax_for(who, ts[who]["taxable"] + tx)
+                    extra = new_tax - ts[who]["tax"]
+                    ts[who]["taxable"] += tx
+                    ts[who]["tax"] = new_tax
                 # Crystallised funds used = gross taken minus what came from uncrystallised.
                 cryst[pid] = max(0.0, cryst[pid] - (gross - from_u)) + kept
                 bal[pid] -= gross
                 cryst[pid] = min(cryst[pid], bal[pid])
-                lsa_left -= tf
+                lsa_left[who] -= tf
+                tfc_by[who] += tf
                 py.tax_free += tf
                 py.taxable += tx
                 py.tax += extra
@@ -496,8 +529,15 @@ def project(plan: Plan) -> Forecast:
             pys[pid].cost_basis = base[pid]
         overdraft *= 1 + _real(a.overdraft_rate, infl, method) * f
 
-        flat_tax = sum(py.tax for py in pys.values()) - (tax_state["tax"] - tax_on_income)
-        breakdown = income_tax(tax_state["taxable"], rules, scottish, tax_scale) if tax_state["taxable"] else None
+        total_income_tax = sum(t["tax"] for t in ts.values())
+        flat_tax = sum(py.tax for py in pys.values()) - (total_income_tax - tax_on_income)
+        breakdowns = {who: income_tax(t["taxable"], rules, scot[who], tax_scale) if t["taxable"] else None
+                      for who, t in ts.items()}
+        breakdown = breakdowns["client"]
+        by_person = {who: {"name": people[who].name, "taxable_income": ts[who]["taxable"],
+                           "income_tax": ts[who]["tax"], "capital_gains": gs[who]["gains"], "cgt": gs[who]["cgt"],
+                           "tax_free_cash": tfc_by[who],
+                           "bands": breakdowns[who].bands if breakdowns[who] else []} for who in people}
         rows.append(
             YearRow(
                 year=ys.year,
@@ -512,14 +552,15 @@ def project(plan: Plan) -> Forecast:
                 surplus_deficit=surplus,
                 drawn_for_shortfall_net=drawn_net,
                 unfunded_shortfall=unfunded,
-                tax_paid=flat_tax + tax_state["tax"],
+                tax_paid=flat_tax + total_income_tax,
                 overdraft=overdraft,
                 savings_end=sum(bal.values()) - overdraft,
-                income_tax=tax_state["tax"],
-                taxable_income=tax_state["taxable"],
+                income_tax=total_income_tax,
+                taxable_income=sum(t["taxable"] for t in ts.values()),
                 tax_free_cash=sum(py.tax_free for py in pys.values()),
-                capital_gains=gains_state["gains"],
-                cgt=gains_state["cgt"],
+                capital_gains=sum(g["gains"] for g in gs.values()),
+                cgt=sum(g["cgt"] for g in gs.values()),
+                tax_by_person=by_person,
                 event_costs=event_costs,
                 events=events,
                 tax_bands=breakdown.bands if breakdown else [],
@@ -527,7 +568,7 @@ def project(plan: Plan) -> Forecast:
             )
         )
         # The lump sum allowance is frozen in cash terms, so it shrinks in today's terms.
-        lsa_left = max(0.0, lsa_left * (1 - infl * f))
+        lsa_left = {who: max(0.0, v * (1 - infl * f)) for who, v in lsa_left.items()}
         elapsed += f
 
     final = rows[-1].savings_end if rows else sum(bal.values())

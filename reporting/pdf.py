@@ -441,8 +441,8 @@ def _tax(data: ReportData, st, width):
     t = f.totals()
     out = [PageBreak(), Paragraph("Income tax and tax-free cash", st["h1"]),
            Paragraph(f"Over the plan, income tax totals <b>{money(t['income_tax'])}</b> and tax-free cash taken "
-                     f"from pensions totals <b>{money(t['tax_free_cash'])}</b>. Tax is worked out on all taxable "
-                     f"income together, including salary, State Pension, other pensions and rent, so pension "
+                     f"from pensions totals <b>{money(t['tax_free_cash'])}</b>. Tax is worked out on all of a person's "
+                     f"taxable income together, including salary, State Pension, other pensions and rent, so pension "
                      f"withdrawals can fall into a higher band when other income is high.", st["body"])]
     if t["cgt"]:
         out.append(Paragraph(
@@ -451,30 +451,57 @@ def _tax(data: ReportData, st, width):
             f"<b>{money(t['cgt'])}</b>. Each year's gains above the annual exempt amount are taxed at "
             f"{pct(data.plan.assumptions.tax_rules.cgt_basic_rate, 0)} within the unused basic rate band and "
             f"{pct(data.plan.assumptions.tax_rules.cgt_higher_rate, 0)} above it.", st["body"]))
-    first_tax = next((r for r in f.rows if r.tax_bands), None)
-    if first_tax:
-        rows = [["Band", "Rate", "Income in band", "Tax"]]
-        for name, rate, amount, tax in first_tax.tax_bands:
-            rows.append([name, pct(rate, 0), money(amount), money(tax)])
-        rows.append(["Total", "", money(sum(b[2] for b in first_tax.tax_bands)), money(first_tax.income_tax)])
-        out += [Paragraph(f"How the tax is worked out at age {first_tax.age}", st["h2"]),
-                Paragraph(f"Taxable income {money(first_tax.taxable_income)}. Amounts above the personal "
-                          f"allowance fall into these bands:", st["body"]),
-                _table(rows, [width * 0.35, width * 0.15, width * 0.25, width * 0.25], st, right_from=1,
-                       total_row=True)]
-    rows = [["Age", "Year", "Taxable income", "Income tax", "Tax-free cash", "Effective rate"]]
+    couple = data.plan.partner is not None
+    people = list(f.rows[0].tax_by_person) if f.rows else ["client"]
+    names = {who: (f.rows[0].tax_by_person[who]["name"] if f.rows else who) for who in people}
+    if couple:
+        out.append(Paragraph(
+            "Spending is recorded for the household, so the cashflow uses household income and tax. "
+            "Each person is taxed separately on their own income, with their own personal allowance and "
+            "bands; joint income and joint accounts are split equally between them. The household tax is "
+            "the total of the two.", st["body"]))
+    first = next((r for r in f.rows if any(p["bands"] for p in r.tax_by_person.values())), None)
+    if first:
+        out.append(Paragraph(f"How the tax is worked out at age {first.age}", st["h2"]))
+        for who in people:
+            pt = first.tax_by_person[who]
+            if not pt["bands"]:
+                continue
+            rows = [["Band", "Rate", "Income in band", "Tax"]]
+            for name, rate, amount, tax in pt["bands"]:
+                rows.append([name, pct(rate, 0), money(amount), money(tax)])
+            rows.append(["Total", "", money(sum(b[2] for b in pt["bands"])), money(pt["income_tax"])])
+            who_txt = f"{pt['name']}: taxable" if couple else "Taxable"
+            out += [Paragraph(f"{who_txt} income {money(pt['taxable_income'])}. Amounts above the personal "
+                              f"allowance fall into these bands:", st["body"]),
+                    _table(rows, [width * 0.35, width * 0.15, width * 0.25, width * 0.25], st, right_from=1,
+                           total_row=True)]
+    if couple:
+        first_names = [names[w].split()[0] if names[w] else w for w in people]
+        rows = [["Age", "Year", "Household taxable income", "Household income tax",
+                 *[f"{n}'s tax" for n in first_names], "Tax-free cash"]]
+    else:
+        rows = [["Age", "Year", "Taxable income", "Income tax", "Tax-free cash", "Effective rate"]]
     for r in f.rows:
         if r.taxable_income <= 0 and r.tax_free_cash <= 0 and r.tax_paid <= 0:
             continue
-        eff = r.income_tax / r.taxable_income if r.taxable_income else 0.0
-        rows.append([str(r.age), str(r.year), money(r.taxable_income), money(r.income_tax),
-                     money(r.tax_free_cash), pct(eff, 1)])
+        if couple:
+            rows.append([str(r.age), str(r.year), money(r.taxable_income), money(r.income_tax),
+                         *[money(r.tax_by_person[w]["income_tax"]) for w in people], money(r.tax_free_cash)])
+        else:
+            eff = r.income_tax / r.taxable_income if r.taxable_income else 0.0
+            rows.append([str(r.age), str(r.year), money(r.taxable_income), money(r.income_tax),
+                         money(r.tax_free_cash), pct(eff, 1)])
     if len(rows) > 1:
-        rows.append(["Total", "", money(sum(r.taxable_income for r in f.rows)), money(t["income_tax"]),
-                     money(t["tax_free_cash"]), ""])
+        if couple:
+            rows.append(["Total", "", money(sum(r.taxable_income for r in f.rows)), money(t["income_tax"]),
+                         *[money(sum(r.tax_by_person[w]["income_tax"] for r in f.rows)) for w in people],
+                         money(t["tax_free_cash"])])
+            widths = (0.08, 0.08, 0.18, 0.16, *([0.36 / len(people)] * len(people)), 0.14)
+        else:
+            widths = (0.1, 0.1, 0.22, 0.2, 0.2, 0.18)
         out += [Paragraph("Tax year by year", st["h2"]),
-                _table(rows, [w * width for w in (0.1, 0.1, 0.22, 0.2, 0.2, 0.18)], st, right_from=0,
-                       total_row=True)]
+                _table(rows, [w * width for w in widths], st, right_from=0, total_row=True)]
     return out
 
 
