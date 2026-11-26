@@ -23,7 +23,11 @@ def sample_plan() -> Plan:
         start_date=date(2026, 11, 1),
         pots=[Pot("sipp", "SIPP", PotType.PENSION, 450_000, 0.0, atr=5, charges=d.charges_for("pension"),
                   tax_mode="uk"),
-              Pot("isa", "Stocks and shares ISA", PotType.ISA, 120_000, 0.0, atr=6, charges=d.charges_for("isa")),
+              Pot("isa", "Stocks and shares ISA", PotType.ISA, 120_000, 0.0, atr=6, portfolio="Tatton Classic Active",
+                  charges=d.charges_for("isa", portfolio="Tatton Classic Active"), managed=True, transfer=True,
+                  initial_fee=d.initial_fee, platform="Transact"),
+              Pot("gia", "General investment account", PotType.GIA, 80_000, 0.0, atr=5, tax_mode="cgt",
+                  cost_basis=40_000, charges=[Charge("platform", tiers=[[50_000, 0.003], [None, 0.002]])]),
               Pot("cash", "Cash savings", PotType.CASH, 30_000, 0.02)],
         incomes=[Income("Salary", 55_000, start_age=62, end_age=64, taxable=True, kind="employment"),
                  Income("State Pension", 241.30, Frequency.WEEKLY, start_age=67, taxable=True,
@@ -33,8 +37,9 @@ def sample_plan() -> Plan:
                                 basis="gross", method="tax_free_cash")],
         events=[LifeEvent("New car", 25_000, Frequency.ONE_OFF, start_age=66, pot_id="isa", kind="vehicle"),
                 LifeEvent("Gift to children", 20_000, Frequency.ONE_OFF, start_age=70, kind="gift")],
-        withdrawal_order=["cash", "isa", "sipp"],
-        assumptions=Assumptions(inflation=0.02, end_age=95, atr_returns=d.atr_returns_snapshot()),
+        withdrawal_order=["cash", "gia", "isa", "sipp"],
+        assumptions=Assumptions(inflation=0.02, end_age=95, atr_returns=d.atr_returns_snapshot(),
+                                platforms=d.platforms_snapshot()),
     )
 
 
@@ -100,3 +105,28 @@ def test_excel_matches_engine(data):
         assert ws.cell(row=i, column=end_col).value == pytest.approx(r.savings_end)
     assert {"Summary", "Assumptions", "Accounts", "Charges", "Life events", "Account detail",
             "Scenarios"} <= set(wb.sheetnames)
+
+
+def test_firm_fees_tiers_and_cgt_in_report(data):
+    rows = {(r["pot"], r["charge"]): r for r in data.charge_rows()}
+    assert rows[("Stocks and shares ISA", "Initial fee (transfer)")]["total"] == pytest.approx(120_000 * 0.03)
+    assert ("Stocks and shares ISA", "Ongoing adviser charge") in rows
+    assert ("SIPP", "Ongoing adviser charge") not in rows  # not managed by us
+    assert rows[("Stocks and shares ISA", "Transaction costs")]["rate"] == "0.11%"
+    assert rows[("General investment account", "Platform charge")]["rate"].startswith("Tiered")
+    t = data.forecast.totals()
+    assert t["cgt"] > 0
+    text = "\n".join(p.extract_text() for p in PdfReader(BytesIO(render_pdf(data))).pages)
+    assert "Initial fee (transfer)" in text and "Managed by us" in text
+    assert money(t["cgt"]) in text
+    ws = load_workbook(BytesIO(render_xlsx(data)))["Year by year"]
+    col = [c.value for c in ws[3]].index("CGT") + 1
+    assert sum(ws.cell(row=i, column=col).value for i in range(4, ws.max_row + 1)) == pytest.approx(t["cgt"])
+
+
+def test_platform_charges_in_report(data):
+    rows = {(r["pot"], r["charge"]): r for r in data.charge_rows()}
+    plat = rows[("Stocks and shares ISA", "Platform charge (Transact)")]
+    assert plat["year1"] > 0 and plat["rate"].startswith("Tiered")
+    assert ("Stocks and shares ISA", "Platform wrapper fee (Transact)") in rows
+    assert sum(r["total"] for r in data.charge_rows()) == pytest.approx(data.forecast.totals()["charges"])

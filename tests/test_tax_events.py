@@ -193,6 +193,7 @@ def test_scheduled_income_from_age_85_only():
 def test_itemised_charges_and_net_return():
     p = plan()
     p.pots[1].growth_rate = 0.05
+    p.pots[1].managed = True  # the adviser charge only applies to products the firm manages
     p.pots[1].charges = [Charge("fmc", 0.002), Charge("platform", 0.0025), Charge("adviser", 0.005),
                          Charge("fixed", amount=100)]
     f = project(p)
@@ -201,7 +202,7 @@ def test_itemised_charges_and_net_return():
     assert r.charges_by_type["Platform charge"] == pytest.approx(500)
     assert r.charges_by_type["Ongoing adviser charge"] == pytest.approx(1_000)
     assert r.charges_by_type["Fixed annual fee"] == pytest.approx(100)
-    assert f.pot_rates["isa"] == {"gross": 0.05, "charges": pytest.approx(0.0095), "net": pytest.approx(0.0405),
+    assert f.pot_rates["isa"] == {"gross": 0.05, "charges": pytest.approx(0.0095), "net": pytest.approx(0.0405), "platform": 0.0,
                                   "fixed_fees": 100}
     # Charges are on the current value, not the original investment.
     assert f.rows[1].pots["isa"].charges_by_type["Platform charge"] == pytest.approx(r.closing * 0.0025)
@@ -228,3 +229,70 @@ def test_custom_growth_overrides_atr():
     p.pots[1].growth_rate = 0.09
     p.assumptions.atr_returns = FirmDefaults().atr_returns_snapshot()
     assert project(p).pot_rates["isa"]["gross"] == 0.09
+
+
+def test_tiered_platform_charge():
+    banded = Charge("platform", tiers=[[250_000, 0.0025], [500_000, 0.0015], [None, 0.0005]])
+    assert banded.percent_on(100_000) == pytest.approx(250)
+    assert banded.percent_on(600_000) == pytest.approx(625 + 375 + 50)
+    whole = Charge("platform", tiers=[[250_000, 0.0025], [500_000, 0.0015], [None, 0.0005]], tier_basis="whole")
+    assert whole.percent_on(300_000) == pytest.approx(450)
+    p = plan()
+    p.pots[1].charges = [banded]
+    p.pots[1].value = 600_000
+    assert row0(p).pots["isa"].charges_by_type["Platform charge"] == pytest.approx(1_050)
+    assert project(p).pot_rates["isa"]["charges"] == pytest.approx(1_050 / 600_000)
+
+
+@pytest.mark.parametrize("income,expected", [
+    # Neo's 2026/27 Scottish bands: starter 19% to £16,537, basic 20% to £29,526, intermediate 21% to
+    # £43,662, higher 42% to £75,000, advanced 45% to £125,140, top 48% above.
+    (16_537, (16_537 - 12_570) * 0.19),
+    (29_526, 3_967 * 0.19 + (29_526 - 16_537) * 0.20),
+    (43_662, 3_967 * 0.19 + 12_989 * 0.20 + (43_662 - 29_526) * 0.21),
+    (75_000, 3_967 * 0.19 + 12_989 * 0.20 + 14_136 * 0.21 + (75_000 - 43_662) * 0.42),
+])
+def test_scottish_bands_match_2026_27_table(income, expected):
+    assert income_tax(income, RULES, scottish=True).total == pytest.approx(expected)
+
+
+# ------------------------------------------------------------------ Capital Gains Tax
+def gia_plan(value=100_000, base=50_000, **kw):
+    p = plan(**kw)
+    p.pots.append(Pot("gia", "GIA", PotType.GIA, value, growth_rate=0.0, tax_mode="cgt", cost_basis=base))
+    return p
+
+
+def test_cgt_on_gia_sale_basic_rate():
+    from cashflow_engine.tax import capital_gains_tax
+    p = gia_plan(withdrawals=[Withdrawal("Sell", 20_000, start_age=60, end_age=60, pot_id="gia", basis="gross")])
+    r = row0(p)
+    # Half of the value is gain: £10,000 gain, £3,000 exempt, £7,000 at 18% (no other income).
+    assert r.capital_gains == pytest.approx(10_000)
+    assert r.cgt == pytest.approx(7_000 * 0.18)
+    assert r.net_withdrawals == pytest.approx(20_000 - 1_260)
+    assert r.pots["gia"].cost_basis == pytest.approx(40_000)
+    assert capital_gains_tax(10_000, 60_000, RULES) == pytest.approx(7_000 * 0.24)
+
+
+def test_cgt_uses_higher_rate_above_basic_band():
+    p = gia_plan(incomes=[Income("Salary", 45_270, start_age=60, taxable=True, kind="employment")],
+                 withdrawals=[Withdrawal("Sell", 40_000, start_age=60, end_age=60, pot_id="gia", basis="gross")])
+    r = row0(p)
+    # £20,000 gain, £17,000 taxable; £5,000 of basic band left at 18%, the rest at 24%.
+    assert r.cgt == pytest.approx(5_000 * 0.18 + 12_000 * 0.24)
+    assert r.tax_paid == pytest.approx(r.income_tax + r.cgt)
+
+
+def test_cgt_net_withdrawal_grossed_up():
+    p = gia_plan(value=200_000, base=50_000,
+                 withdrawals=[Withdrawal("Sell", 50_000, start_age=60, end_age=60, pot_id="gia", basis="net")])
+    r = row0(p)
+    assert r.net_withdrawals == pytest.approx(50_000, abs=0.01)
+    assert r.pots["gia"].withdrawals_gross > 50_000
+
+
+def test_no_gain_no_cgt_and_base_cost_defaults_to_value():
+    p = gia_plan(base=None, withdrawals=[Withdrawal("Sell", 20_000, start_age=60, end_age=60, pot_id="gia",
+                                                    basis="gross")])
+    assert row0(p).cgt == 0

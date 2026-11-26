@@ -71,6 +71,8 @@ def without_charges(plan: Plan) -> Plan:
     for pot in p.pots:
         pot.charges = []
         pot.charge_rate = 0.0
+        pot.initial_fee = 0.0
+        pot.platform = None
     p.one_off_charges = []
     return p
 
@@ -96,6 +98,7 @@ class ReportData:
             (f"Savings at age {f.final_age}", money(f.final_savings)),
             ("Money lasts", "Throughout the plan" if run_out is None else f"Runs out at age {run_out}"),
             ("Total income tax", money(t["income_tax"])),
+            *([("Total Capital Gains Tax", money(t["cgt"]))] if t["cgt"] else []),
             ("Total tax-free cash taken", money(t["tax_free_cash"])),
             ("Total charges", money(t["charges"])),
             ("Total life event costs", money(t["events"])),
@@ -114,7 +117,7 @@ class ReportData:
                 basis = f"{p.portfolio} (ATR {p.atr})" if p.atr else p.portfolio
             out.append({"id": p.id, "name": p.name, "type": POT_TYPES.get(p.type.value, p.type.value),
                         "value": p.value, "basis": basis, "gross": r["gross"], "charges": r["charges"],
-                        "net": r["net"], "fixed": r["fixed_fees"],
+                        "net": r["net"], "fixed": r["fixed_fees"], "managed": p.managed, "platform": p.platform,
                         "runs_out": self.forecast.pot_depletion_age(p.id)})
         return out
 
@@ -125,21 +128,33 @@ class ReportData:
     # ----------------------------------------------------------------- charges
     def charge_rows(self) -> list[dict]:
         """Itemised charges for each pot: rate, first-year £ and total £ over the plan."""
-        from cashflow_engine.engine import _charges
+        from cashflow_engine.engine import INITIAL_FEE, PLATFORM_CHARGE, WRAPPER_FEE, _charges
         out = []
         first = self.forecast.rows[0] if self.forecast.rows else None
         for p in self.plan.pots:
-            items = _charges(p)
-            if not items:
-                continue
-            for c in items:
+            if p.initial_charge() > 0:
+                amt = sum(r.pots[p.id].charges_by_type.get(INITIAL_FEE, 0.0) for r in self.forecast.rows)
+                out.append({"pot": p.name, "charge": INITIAL_FEE, "rate": pct(p.initial_charge()) + " once",
+                            "fixed": "", "year1": amt, "total": amt})
+            if p.platform:
+                rate = self.forecast.pot_rates[p.id].get("platform", 0.0)
+                for label in (PLATFORM_CHARGE, WRAPPER_FEE):
+                    total = sum(r.pots[p.id].charges_by_type.get(label, 0.0) for r in self.forecast.rows)
+                    if total:
+                        yr1 = first.pots[p.id].charges_by_type.get(label, 0.0) if first else 0.0
+                        out.append({"pot": p.name, "charge": f"{label} ({p.platform})",
+                                    "rate": f"Tiered ({pct(rate)} now)" if label == PLATFORM_CHARGE else "",
+                                    "fixed": "", "year1": yr1, "total": total})
+            for c in _charges(p):
                 label = c.label
                 total = sum(r.pots[p.id].charges_by_type.get(label, 0.0) for r in self.forecast.rows)
                 yr1 = first.pots[p.id].charges_by_type.get(label, 0.0) if first else 0.0
-                if c.rate == 0 and c.amount == 0 and total == 0:
+                if c.rate == 0 and c.amount == 0 and not c.tiers and total == 0:
                     continue
+                rate = (f"Tiered ({pct(c.effective_rate(p.value))} now)" if c.tiers else
+                        (pct(c.rate) if c.rate else ""))
                 out.append({"pot": p.name, "charge": label,
-                            "rate": pct(c.rate) if c.rate else "", "fixed": money(c.amount) if c.amount else "",
+                            "rate": rate, "fixed": money(c.amount) if c.amount else "",
                             "year1": yr1, "total": total})
         return out
 

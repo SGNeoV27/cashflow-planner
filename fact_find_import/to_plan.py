@@ -67,8 +67,9 @@ def to_plan(ff: FactFind, start_date: date, date_of_birth: date | None = None,
             growth_rate=d.growth_for(kind, atr=atr if invested else None, product=product),
             charges=d.charges_for(kind), tax_rate=d.tax.get(kind, 0.0), owner=h.owner,
             atr=atr if invested else None, product=product,
-            tax_mode=d.pension_tax_mode if pension else "flat",
-            withdrawal_method=d.pension_withdrawal_method))
+            tax_mode=d.pension_tax_mode if pension else (d.gia_tax_mode if kind == "gia" else "flat"),
+            withdrawal_method=d.pension_withdrawal_method,
+            platform=d.default_platform if invested else None))
 
     expenses = [Expense(e.name, e.amount, Frequency(e.frequency), start_age=start_age,
                         category=e.priority or e.category) for e in ff.expenses]
@@ -93,5 +94,6 @@ def to_plan(ff: FactFind, start_date: date, date_of_birth: date | None = None,
         expenses=expenses,
         withdrawal_order=order,
         assumptions=Assumptions(inflation=d.inflation, end_age=d.end_age,
-                                atr_returns=d.atr_returns_snapshot(), return_scenario=d.return_scenario),
+                                atr_returns=d.atr_returns_snapshot(), return_scenario=d.return_scenario,
+                                platforms=d.platforms_snapshot()),
     )

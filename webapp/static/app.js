@@ -12,7 +12,8 @@ const COLOURS = ["#1f5f8b", "#3d9970", "#e0a030", "#8e5ea2", "#c0504d", "#4bacc6
 
 const INCOME_KINDS = ["employment", "self_employment", "state_pension", "db_pension", "rental", "investment", "other"];
 const EVENT_KINDS = ["property_purchase", "home_improvements", "vehicle", "gift", "care", "healthcare", "other"];
-const CHARGE_KINDS = { fmc: "Fund management (FMC/OCF)", platform: "Platform", dfm: "DFM", adviser: "Adviser", other: "Other ongoing", fixed: "Fixed annual fee" };
+const CHARGE_KINDS = { fmc: "Fund management (FMC/OCF)", platform: "Platform", dfm: "DFM", transaction: "Transaction costs", adviser: "Adviser (managed only)", other: "Other ongoing", fixed: "Fixed annual fee" };
+const FIRM_KINDS = ["adviser"];
 const METHODS = { ufpls: "UFPLS (25% tax-free)", drawdown: "Drawdown (taxable)", tax_free_cash: "Tax-free cash only" };
 const label = (v) => String(v ?? "").replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
 function atrOptions(d, sel, scenario) {
@@ -27,7 +28,36 @@ function growthFor(d, pot, scenario) {
   if (pot.type === "cash") return d.cash_return;
   return d.atr_table[pot.atr ?? d.default_atr]?.[scenario || "central"];
 }
-const potCharges = (p) => (p.charges?.length ? p.charges.reduce((a, c) => a + (c.rate || 0), 0) : p.charge_rate || 0);
+// Mirrors Charge.percent_on / Pot.percent_charges in the engine.
+function chargeOn(c, v) {
+  const t = c.tiers;
+  if (!t || !t.length) return v * (c.rate || 0);
+  if (c.tier_basis === "whole") { const row = t.find(([u]) => u == null || v <= u) || t[t.length - 1]; return v * row[1]; }
+  let total = 0, lower = 0;
+  for (const [u, r] of t) { const top = u == null ? v : Math.min(v, u); if (top > lower) total += (top - lower) * r; if (u == null || v <= u) break; lower = u; }
+  return total;
+}
+const activeCharges = (p) => (p.charges?.length ? p.charges : (p.charge_rate ? [{ kind: "other", rate: p.charge_rate, amount: 0 }] : []))
+  .filter((c) => (p.managed || !FIRM_KINDS.includes(c.kind)) && !(p.platform && c.kind === "platform"));
+const chargeRate = (c, v) => (c.tiers?.length ? (v > 0 ? chargeOn(c, v) / v : c.tiers[0][1]) : c.rate || 0);
+// Platform charges depend on the client's other accounts, so their rate comes from the last forecast.
+let PLATFORM_RATES = {};
+const potCharges = (p) => activeCharges(p).reduce((a, c) => a + chargeRate(c, p.value || 0), 0) + (p.platform ? PLATFORM_RATES[p.id] || 0 : 0);
+const tiersText = (c) => (c.tiers || []).map(([u, r]) => `${u == null ? "" : u}:${pct(r)}`).join(", ");
+function parseTiers(s) {
+  const t = String(s || "").split(",").map((x) => x.trim()).filter(Boolean).map((x) => { const [u, r] = x.split(":"); return [u.trim() === "" ? null : +u, +r / 100]; });
+  if (t.length && t[t.length - 1][0] != null) t.push([null, t[t.length - 1][1]]);
+  return t.length ? t : null;
+}
+// A model portfolio brings its own DFM fee, ongoing costs and transaction costs.
+function applyPortfolioCosts(pot) {
+  const p = SETTINGS.portfolios.find((x) => x.name === pot.portfolio); if (!p) return;
+  pot.charges = pot.charges || [];
+  for (const [kind, rate] of [["dfm", p.dfm], ["fmc", p.ongoing_costs], ["transaction", p.transaction]]) {
+    const c = pot.charges.find((x) => x.kind === kind);
+    if (c) { c.rate = rate || 0; c.tiers = null; } else pot.charges.push({ kind, rate: rate || 0, amount: 0, name: null });
+  }
+}
 let SETTINGS = null;
 
 async function api(path, opts = {}) {
@@ -183,6 +213,53 @@ function reviewView() {
   };
 }
 
+// ---------------------------------------------------------------- platforms
+const WRAPPERS = { gia: "GIA", isa: "ISA", jisa: "Junior ISA", pension: "Pension / SIPP", pension_choice: "Pension (Choice option)",
+  onshore_bond: "Onshore bond", offshore_bond: "Offshore bond", cash: "Cash" };
+const feesText = (o) => Object.entries(o || {}).map(([k, v]) => `${k}:${v}`).join(", ");
+const parseFees = (t) => Object.fromEntries(String(t || "").split(",").map((x) => x.trim()).filter(Boolean).map((x) => { const [k, v] = x.split(":"); return [k.trim(), +v || 0]; }));
+const listText = (a) => (a || []).join(", ");
+const parseList = (t) => String(t || "").split(",").map((x) => x.trim()).filter(Boolean);
+// Editor for a list of platforms (firm defaults or one client's copy). Tiers are "up to £:rate%".
+function platformsEditor(list) {
+  return list.map((p, i) => `<div class="panel" style="background:var(--bg)">
+    <div class="row"><div><label>Platform</label><input data-pf="${i}:name" value="${esc(p.name)}"></div>
+      <div><label>Wrappers counted on their own</label><input data-pf="${i}:separate" value="${esc(listText(p.separate))}" placeholder="e.g. jisa"></div>
+      <div><label>Wrapper fees £ a year</label><input data-pf="${i}:wrapper_fees" value="${esc(feesText(p.wrapper_fees))}" placeholder="e.g. isa:12, pension:80" style="width:220px"></div>
+      <div><label><input type="checkbox" data-pf="${i}:include_cash" ${p.include_cash ? "checked" : ""}> Cash counts towards the total</label></div>
+      <div><button class="small danger" data-pfdel="${i}">Remove platform</button></div></div>
+    <table class="edit" style="margin-top:8px"><tr><th>Wrappers (* = all others)</th><th>Total from £</th><th>Total below £</th><th>Tiers (up to £:rate%)</th><th>Tiers apply</th><th></th></tr>
+    ${p.schedules.map((sc, j) => `<tr><td><input data-ps="${i}:${j}:wrappers" value="${esc(listText(sc.wrappers))}" style="width:190px"></td>
+      <td><input type="number" data-ps="${i}:${j}:min_total" value="${sc.min_total || ""}" placeholder="0" style="width:90px"></td>
+      <td><input type="number" data-ps="${i}:${j}:max_total" value="${sc.max_total ?? ""}" placeholder="no limit" style="width:90px"></td>
+      <td><input data-ps="${i}:${j}:tiers" value="${esc(tiersText(sc))}" style="width:300px"></td>
+      <td><select data-ps="${i}:${j}:basis"><option value="banded" ${sc.basis !== "whole" ? "selected" : ""}>Each slice (tranche)</option><option value="whole" ${sc.basis === "whole" ? "selected" : ""}>Whole value</option></select></td>
+      <td><button class="small danger" data-psdel="${i}:${j}">✕</button></td></tr>`).join("")}</table>
+    <p><button class="small ghost" data-psadd="${i}">+ Add tier table</button> <span class="muted" style="font-size:12px">${esc(p.notes || "")}</span></p></div>`).join("")
+    + `<p><button class="small ghost" id="pfAdd">+ Add platform</button></p>
+    <p class="muted" style="font-size:12px">Tiers are worked out on the client's total value on the platform (all wrappers together, apart from any counted on their own), and each account pays the resulting rate on its own value. Wrapper keys: ${Object.entries(WRAPPERS).map(([k, l]) => `${k} (${l})`).join(", ")}.</p>`;
+}
+function bindPlatforms(list, root, changed) {
+  root.querySelectorAll("[data-pf]").forEach((el) => (el.onchange = () => {
+    const [i, k] = el.dataset.pf.split(":"), p = list[+i];
+    if (k === "include_cash") p[k] = el.checked; else if (k === "separate") p[k] = parseList(el.value);
+    else if (k === "wrapper_fees") p[k] = parseFees(el.value); else p[k] = el.value.trim();
+    changed(false);
+  }));
+  root.querySelectorAll("[data-ps]").forEach((el) => (el.onchange = () => {
+    const [i, j, k] = el.dataset.ps.split(":"), sc = list[+i].schedules[+j];
+    if (k === "wrappers") sc[k] = parseList(el.value); else if (k === "tiers") sc[k] = parseTiers(el.value) || [[null, 0]];
+    else if (k === "min_total") sc[k] = +el.value || 0; else if (k === "max_total") sc[k] = el.value === "" ? null : +el.value;
+    else sc[k] = el.value;
+    changed(k === "tiers");
+  }));
+  root.querySelectorAll("[data-psdel]").forEach((b) => (b.onclick = () => { const [i, j] = b.dataset.psdel.split(":"); list[+i].schedules.splice(+j, 1); changed(true); }));
+  root.querySelectorAll("[data-psadd]").forEach((b) => (b.onclick = () => { list[+b.dataset.psadd].schedules.push({ wrappers: ["*"], tiers: [[null, 0]], min_total: 0, max_total: null, basis: "banded" }); changed(true); }));
+  root.querySelectorAll("[data-pfdel]").forEach((b) => (b.onclick = () => { list.splice(+b.dataset.pfdel, 1); changed(true); }));
+  const add = root.querySelector("#pfAdd");
+  if (add) add.onclick = () => { list.push({ name: "New platform", schedules: [{ wrappers: ["*"], tiers: [[null, 0]], min_total: 0, max_total: null, basis: "banded" }], separate: [], include_cash: false, wrapper_fees: {}, notes: "" }); changed(true); };
+}
+
 // ---------------------------------------------------------------- plan editor
 const ITEM_COLS = [
   ["name", "Description", "text"], ["amount", "Amount £", "num"], ["frequency", "Frequency", FREQS],
@@ -191,10 +268,13 @@ const DATE_COLS = [["start_date", "Or from date", "date?"], ["end_date", "To dat
 const SPECS = {
   pots: { title: "Pensions, savings and investments", cols: [["name", "Name", "text"], ["type", "Type", POT_TYPES], ["value", "Value £", "num"],
     ["atr", "ATR", "atr"], ["portfolio", "Portfolio", "portfolio"], ["product", "Fixed-rate product", "product"],
-    ["growth_rate", "Gross growth %", "growth"], ["_charges", "Charges", "charges"], ["_net", "Net growth %", "net"],
-    ["tax_mode", "Tax", { flat: "Flat rate", uk: "UK income tax" }], ["withdrawal_method", "Pension withdrawals", METHODS], ["tax_rate", "Flat tax %", "pct"]],
+    ["growth_rate", "Gross growth %", "growth"], ["platform", "Platform", "platform"], ["wrapper", "Wrapper", "wrapper"], ["managed", "Managed by us", "bool"], ["transfer", "Transfer in", "bool"], ["initial_fee", "Initial fee %", "pct"],
+    ["_charges", "Charges", "charges"], ["_net", "Net growth %", "net"],
+    ["tax_mode", "Tax", { flat: "Flat rate", uk: "UK income tax", cgt: "Capital Gains Tax" }], ["withdrawal_method", "Pension withdrawals", METHODS], ["tax_rate", "Flat tax %", "pct"],
+    ["cost_basis", "Base cost £ (CGT)", "num?"]],
     blank: () => ({ id: "pot" + Date.now().toString(36), name: "New pot", type: "isa", value: 0, growth_rate: growthFor(SETTINGS, { type: "isa" }), growth_custom: false,
-      atr: SETTINGS.default_atr, charge_rate: 0, charges: JSON.parse(JSON.stringify(SETTINGS.charges.isa || [])), tax_rate: 0, tax_mode: "flat", withdrawal_method: "ufpls", crystallised: 0, owner: null }) },
+      atr: SETTINGS.default_atr, charge_rate: 0, charges: JSON.parse(JSON.stringify(SETTINGS.charges.isa || [])), tax_rate: 0, tax_mode: "flat", withdrawal_method: "ufpls", crystallised: 0, owner: null,
+      managed: false, transfer: false, initial_fee: SETTINGS.initial_fee, cost_basis: null, platform: SETTINGS.default_platform, wrapper: null }) },
   incomes: { title: "Income", cols: [...ITEM_COLS.slice(0, 6), ["kind", "Type", INCOME_KINDS], ["taxable", "Taxable (gross)", "bool"], ...DATE_COLS],
     blank: (p) => ({ name: "Income", amount: 0, frequency: "annual", start_age: startAge(p), end_age: null, inflation: null, category: null, kind: "other", taxable: false }) },
   expenses: { title: "Expenditure", cols: ITEM_COLS, blank: (p) => ({ name: "Expense", amount: 0, frequency: "monthly", start_age: startAge(p), end_age: null, inflation: null, category: null }) },
@@ -228,6 +308,14 @@ async function planView(cid, name) {
   nav([["#/clients", "Clients", false], [`#/client/${cid}/plan/Baseline`, client.name, true],
        [`#/client/${cid}/compare`, "Compare scenarios", false], [`#/client/${cid}/audit`, "Audit trail", false]]);
   let tab = "pots", selected = null, forecast = null, timer = null;
+  // The plan keeps its own copy of the platform tables (older plans start from the firm's).
+  function planPlatforms(copy) {
+    if (!(plan.assumptions.platforms || []).length) {
+      if (!copy) return SETTINGS.platforms;
+      plan.assumptions.platforms = JSON.parse(JSON.stringify(SETTINGS.platforms));
+    }
+    return plan.assumptions.platforms;
+  }
   const base = JSON.parse(JSON.stringify(plan));
   let chargePot = null;
   plan.events ||= [];
@@ -237,7 +325,7 @@ async function planView(cid, name) {
   const grossOf = (pot) => (pot.atr != null && !pot.growth_custom && plan.assumptions.atr_returns[pot.atr])
     ? plan.assumptions.atr_returns[pot.atr][plan.assumptions.return_scenario] : pot.growth_rate;
   const HELP = {
-    pots: "Gross growth comes from the pot's ATR and the forecast's return scenario, unless you type your own rate (↺ goes back to the ATR rate). Net growth is gross growth less the % charges. Charges are taken from the pot's value each year. Pensions on UK income tax are taxed with the client's other income; UFPLS gives 25% tax-free.",
+    pots: "Gross growth comes from the pot's ATR and the forecast's return scenario, unless you type your own rate (↺ goes back to the ATR rate). Net growth is gross growth less the % charges. Charges are taken from the pot's value each year. Pensions on UK income tax are taxed with the client's other income; UFPLS gives 25% tax-free. Tick 'Managed by us' for products the firm manages: only these pay the adviser charge, and the initial fee if they are being transferred in. GIAs on Capital Gains Tax are taxed on the gain in each sale: enter the base cost (what was paid in), or leave it empty if there's no gain yet.",
     incomes: "Tick 'Taxable' for income entered before tax (employment, State Pension, DB pensions, rental): income tax is worked out for you. Leave unticked for amounts already net of tax. Increase blank = rises with inflation. An exact date overrides the age.",
     expenses: "Increase blank = rises with inflation (keeps its value in today's terms). One-off items happen once, at the 'from' age.",
     withdrawals: "Income taken from a pot on a schedule. 'Net' means the amount the client receives after tax: the gross withdrawal is worked out. To have pensions automatically top up spending instead (for example, less once the State Pension starts), leave this empty and put the pension in the withdrawal order.",
@@ -247,17 +335,21 @@ async function planView(cid, name) {
     const ch = pot.charges?.length ? pot.charges : (pot.charge_rate ? [{ kind: "other", rate: pot.charge_rate, amount: 0, name: "Ongoing charges" }] : []);
     pot.charges = ch; pot.charge_rate = 0;
     return `<div class="panel" style="background:var(--bg)"><h2>Charges: ${esc(pot.name)}</h2>
-      <table class="edit"><tr><th>Charge</th><th>% of value a year</th><th>Fixed £ a year</th><th></th></tr>
-      ${ch.map((c, j) => `<tr><td><select data-ck="${j}">${Object.entries(CHARGE_KINDS).map(([k, l]) => `<option value="${k}" ${k === c.kind ? "selected" : ""}>${l}</option>`).join("")}</select></td>
-        <td><input type="number" step="0.01" data-cr="${j}" value="${pct(c.rate)}" style="width:90px"></td>
+      <table class="edit"><tr><th>Charge</th><th>% of value a year</th><th title="Up to £:rate%, separated by commas. Leave the last limit empty for 'above'. E.g. 250000:0.25, 500000:0.15, :0.05">Or tiered (up to £:rate%)</th><th>Tiers apply</th><th>Fixed £ a year</th><th></th></tr>
+      ${ch.map((c, j) => `<tr${FIRM_KINDS.includes(c.kind) && !pot.managed ? ' class="muted" title="Only applies when the pot is managed by us"' : ""}><td><select data-ck="${j}">${Object.entries(CHARGE_KINDS).map(([k, l]) => `<option value="${k}" ${k === c.kind ? "selected" : ""}>${l}</option>`).join("")}</select></td>
+        <td><input type="number" step="0.01" data-cr="${j}" value="${pct(c.rate)}" style="width:90px" ${c.tiers?.length ? "disabled" : ""}></td>
+        <td><input data-ct="${j}" value="${esc(tiersText(c))}" placeholder="e.g. 250000:0.25, :0.15" style="width:220px"></td>
+        <td><select data-cb="${j}"><option value="banded" ${c.tier_basis !== "whole" ? "selected" : ""}>Each slice at its rate</option><option value="whole" ${c.tier_basis === "whole" ? "selected" : ""}>Whole value at one rate</option></select></td>
         <td><input type="number" step="1" data-ca="${j}" value="${c.amount || 0}" style="width:90px"></td>
         <td><button class="small danger" data-cd="${j}">✕</button></td></tr>`).join("")}</table>
-      <p><button class="small ghost" id="addCh">+ Add charge</button> <span class="muted">Total ${pct(potCharges(pot))}% a year${ch.some((c) => c.amount) ? " plus " + gbp(ch.reduce((a, c) => a + (c.amount || 0), 0)) + " fixed" : ""}. Gross ${pct(grossOf(pot))}% → net ${pct(grossOf(pot) - potCharges(pot))}%.</span></p></div>`;
+      <p><button class="small ghost" id="addCh">+ Add charge</button> <span class="muted">Total ${pct(potCharges(pot))}% a year at today's value${pot.managed ? "" : " (the adviser charge only applies when ticked as managed by us)"}${ch.some((c) => c.amount) ? " plus " + gbp(ch.reduce((a, c) => a + (c.amount || 0), 0)) + " fixed" : ""}. Gross ${pct(grossOf(pot))}% → net ${pct(grossOf(pot) - potCharges(pot))}%.</span></p></div>`;
   }
   function bindCharges(pot) {
     const body = document.getElementById("tabBody");
     body.querySelectorAll("[data-ck]").forEach((el) => (el.onchange = () => { pot.charges[+el.dataset.ck].kind = el.value; pot.charges[+el.dataset.ck].name = null; renderTab(); refresh(); }));
     body.querySelectorAll("[data-cr]").forEach((el) => (el.onchange = () => { pot.charges[+el.dataset.cr].rate = +el.value / 100; renderTab(); refresh(); }));
+    body.querySelectorAll("[data-ct]").forEach((el) => (el.onchange = () => { pot.charges[+el.dataset.ct].tiers = parseTiers(el.value); renderTab(); refresh(); }));
+    body.querySelectorAll("[data-cb]").forEach((el) => (el.onchange = () => { pot.charges[+el.dataset.cb].tier_basis = el.value; renderTab(); refresh(); }));
     body.querySelectorAll("[data-ca]").forEach((el) => (el.onchange = () => { pot.charges[+el.dataset.ca].amount = +el.value || 0; renderTab(); refresh(); }));
     body.querySelectorAll("[data-cd]").forEach((el) => (el.onclick = () => { pot.charges.splice(+el.dataset.cd, 1); renderTab(); refresh(); }));
     document.getElementById("addCh").onclick = () => { pot.charges.push({ kind: "other", rate: 0, amount: 0, name: null }); renderTab(); };
@@ -317,7 +409,7 @@ async function planView(cid, name) {
       </div>
     </div>
     <div class="panel">
-      <div class="tabs">${Object.entries(SPECS).map(([k, s]) => `<button data-tab="${k}">${esc(s.title.split(" (")[0])}</button>`).join("")}<button data-tab="order">Withdrawal order</button></div>
+      <div class="tabs">${Object.entries(SPECS).map(([k, s]) => `<button data-tab="${k}">${esc(s.title.split(" (")[0])}</button>`).join("")}<button data-tab="order">Withdrawal order</button><button data-tab="platforms">Platforms</button></div>
       <div id="tabBody" class="scroll"></div>
     </div>
     <div class="panel"><h2>Year by year</h2><div class="years"><table id="years"></table></div></div>`;
@@ -332,8 +424,9 @@ async function planView(cid, name) {
     if (t === "pct" || t === "pct?") return v === "" ? (t === "pct?" ? null : 0) : +v / 100;
     if (t === "int" || t === "int?") return v === "" ? (t === "int?" ? null : 0) : parseInt(v, 10);
     if (t === "num") return +v || 0;
+    if (t === "num?") return v === "" ? null : +v;
     if (t === "bool") return el.checked;
-    if (t === "pot" || t === "pot?" || t === "portfolio" || t === "product" || t === "date?") return v || null;
+    if (t === "pot" || t === "pot?" || t === "portfolio" || t === "product" || t === "date?" || t === "platform" || t === "wrapper") return v || null;
     if (t === "inflbool") return el.checked ? null : 0;
     if (t === "growth") return v === "" ? 0 : +v / 100;
     if (t === "atr") return v === "" ? null : +v;
@@ -356,6 +449,14 @@ async function planView(cid, name) {
   function renderTab() {
     document.querySelectorAll("[data-tab]").forEach((b) => b.classList.toggle("on", b.dataset.tab === tab));
     const body = document.getElementById("tabBody");
+    if (tab === "platforms") {
+      const list = planPlatforms(true);
+      body.innerHTML = `<p class="muted">This client's copy of the platform charges. Changes here only affect this client; the firm's tables are on the Default assumptions page.
+        <button class="small ghost" id="pfReset">Reset to firm defaults</button></p>${platformsEditor(list)}`;
+      bindPlatforms(list, body, (rerender) => { if (rerender) renderTab(); refresh(); });
+      document.getElementById("pfReset").onclick = () => { plan.assumptions.platforms = JSON.parse(JSON.stringify(SETTINGS.platforms)); renderTab(); refresh(); };
+      return;
+    }
     if (tab === "order") {
       const order = plan.withdrawal_order;
       plan.pots.forEach((p) => { if (!order.includes(p.id)) order.push(p.id); });
@@ -381,15 +482,18 @@ async function planView(cid, name) {
       if (t === "date?") return `<input type="date" ${at} value="${esc(v ?? "")}" style="width:140px">`;
       if (t === "inflbool") return `<input type="checkbox" ${at} ${v == null ? "checked" : ""}>`;
       if (t === "growth") { const g = grossOf(r); return `<input type="number" step="0.01" ${at} value="${pct(g)}" style="width:80px" title="${r.growth_custom || r.atr == null ? "Custom rate" : "From ATR " + r.atr}">${r.growth_custom && r.atr != null ? `<button class="small ghost" data-reset="${i}" title="Use the ATR rate">↺</button>` : ""}`; }
-      if (t === "charges") return `<button class="small ghost" data-chg="${i}">${pct(potCharges(r))}%${(r.charges || []).some((c) => c.amount) ? " + fees" : ""} ✎</button>`;
-      if (t === "net") return `<b>${pct(grossOf(r) - potCharges(r))}%</b>`;
+      if (t === "charges") return `<button class="small ghost" data-chg="${i}" data-chgv="${i}">${pct(potCharges(r))}%${(r.charges || []).some((c) => c.amount) ? " + fees" : ""} ✎</button>`;
+      if (t === "net") return `<b data-netv="${i}">${pct(grossOf(r) - potCharges(r))}%</b>`;
       if (t === "atr") return `<select ${at} style="min-width:70px"><option value="">–</option>${atrOptions(SETTINGS, v)}</select>`;
       if (t === "portfolio") return `<select ${at} style="min-width:150px"><option value="">–</option>${SETTINGS.portfolios.map((p) => `<option ${p.name === v ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select>`;
       if (t === "product") return `<select ${at}><option value="">–</option>${Object.keys(SETTINGS.product_returns).map((n) => `<option ${n === v ? "selected" : ""}>${esc(n)}</option>`).join("")}</select>`;
       if (t === "bool") return `<input type="checkbox" ${at} ${v ? "checked" : ""}>`;
+      if (t === "platform") return `<select ${at}><option value="">–</option>${planPlatforms().map((p) => `<option ${p.name === v ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select>`;
+      if (t === "wrapper") return `<select ${at}><option value="">(from type)</option>${Object.entries(WRAPPERS).map(([k, l]) => `<option value="${k}" ${k === v ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
       if (t.startsWith("pct")) return `<input type="number" step="0.01" ${at} value="${v == null ? "" : pct(v)}" placeholder="${t === "pct?" ? "assumed" : ""}" style="width:80px">`;
       if (t.startsWith("int")) return `<input type="number" ${at} value="${v ?? ""}" placeholder="${t === "int?" ? "end" : ""}" style="width:70px">`;
       if (t === "num") return `<input type="number" step="any" ${at} value="${v ?? 0}" style="width:110px">`;
+      if (t === "num?") return `<input type="number" step="any" ${at} value="${v ?? ""}" placeholder="${r.tax_mode === "cgt" ? "= value" : "–"}" style="width:110px">`;
       return `<input ${at} value="${esc(v ?? "")}">`;
     };
     body.innerHTML = `<table class="edit"><tr>${spec.cols.map((c) => `<th>${esc(c[1])}</th>`).join("")}<th></th></tr>
@@ -412,12 +516,19 @@ async function planView(cid, name) {
         if (el.dataset.c === "method" && v === "") v = null;
         row[el.dataset.c] = v;
         if (el.dataset.c === "growth_rate") row.growth_custom = true;
+        if (tab === "pots" && el.dataset.c === "platform" && v) planPlatforms(true);
+        if (tab === "pots" && el.dataset.c === "managed" && v) {
+          // The firm's ongoing fee only applies to products it manages.
+          row.charges = activeCharges({ ...row, managed: true });
+          if (!row.charges.some((c) => c.kind === "adviser")) row.charges.push({ kind: "adviser", rate: SETTINGS.ongoing_fee, amount: 0, name: null });
+          if (!row.initial_fee) row.initial_fee = SETTINGS.initial_fee;
+        }
         if (tab === "pots" && ["atr", "portfolio", "product", "type"].includes(el.dataset.c)) {
           // Choosing a risk basis sets the growth from the ATR table; growth can still be overtyped.
-          if (el.dataset.c === "portfolio" && row.portfolio) row.atr = SETTINGS.portfolios.find((p) => p.name === row.portfolio)?.atr ?? row.atr;
+          if (el.dataset.c === "portfolio" && row.portfolio) { row.atr = SETTINGS.portfolios.find((p) => p.name === row.portfolio)?.atr ?? row.atr; applyPortfolioCosts(row); }
           if (row.product || ["cash", "current_account"].includes(row.type)) { row.atr = row.product ? null : row.atr; row.growth_custom = true; row.growth_rate = growthFor(SETTINGS, row) ?? row.growth_rate; }
           else { row.growth_custom = false; row.growth_rate = growthFor(SETTINGS, row, plan.assumptions.return_scenario) ?? row.growth_rate; }
-          if (el.dataset.c === "type") { row.tax_mode = row.type === "pension" ? SETTINGS.pension_tax_mode : "flat"; if (!(row.charges || []).length) row.charges = JSON.parse(JSON.stringify(SETTINGS.charges[row.type] || [])); }
+          if (el.dataset.c === "type") { row.tax_mode = row.type === "pension" ? SETTINGS.pension_tax_mode : row.type === "gia" ? SETTINGS.gia_tax_mode : "flat"; if (!(row.charges || []).length) row.charges = JSON.parse(JSON.stringify(SETTINGS.charges[row.type] || [])); }
         }
         if (tab === "pots" || t === "inflbool") renderTab();
         if (tab === "pots") bindFields();
@@ -451,6 +562,13 @@ async function planView(cid, name) {
   }
   function draw() {
     const f = forecast, last = f.rows[f.rows.length - 1];
+    PLATFORM_RATES = Object.fromEntries(Object.entries(f.pot_rates).map(([id, r]) => [id, r.platform || 0]));
+    if (tab === "pots") plan.pots.forEach((p, i) => {
+      const r = f.pot_rates[p.id]; if (!r) return;
+      const b = document.querySelector(`[data-chgv="${i}"]`), n = document.querySelector(`[data-netv="${i}"]`);
+      if (b) b.textContent = `${pct(r.charges)}%${r.fixed_fees ? " + fees" : ""} ✎`;
+      if (n) n.textContent = `${pct(r.net)}%`;
+    });
     const ret = plan.client.retirement_age, retRow = f.rows.find((r) => r.age === ret);
     const runOut = Object.entries(f.pots_run_out_at).filter(([, a]) => a != null);
     document.getElementById("kpis").innerHTML = `
@@ -623,12 +741,18 @@ async function settingsView() {
           <div class="row" style="margin-top:10px"><div><label>Default ATR for new clients</label><select id="s_defatr">${atrOptions(d, d.default_atr)}</select></div>
           <div><label>Default return scenario</label><select id="s_sc">${["lower", "central", "upper"].map((x) => `<option ${x === d.return_scenario ? "selected" : ""} value="${x}">${label(x)}</option>`).join("")}</select></div></div></div>
         <div class="panel"><h2>Charges by pot type</h2>
-          <p class="muted" style="font-size:12px">Each new or imported pot starts with these charges. Percentages are a year, on the pot's value. Fixed fees are £ a year in today's money.</p>
+          <p class="muted" style="font-size:12px">Each new or imported pot starts with these charges. Percentages are a year, on the pot's value. Fixed fees are £ a year in today's money. Picking a model portfolio on a pot replaces the DFM, fund and transaction costs with the portfolio's own. Platform tiers: up to £:rate%, separated by commas, e.g. <code>250000:0.25, 500000:0.15, :0.05</code>; when tiers are entered they replace the single platform rate.</p>
           <div class="scroll"><table class="edit"><tr><th>Charge</th>${TYPES.map((t) => `<th>${POT_LABELS[t]}</th>`).join("")}</tr>
-          ${Object.entries(CHARGE_KINDS).map(([k, l]) => `<tr><td>${l}${k === "fixed" ? " (£)" : " (%)"}</td>${TYPES.map((t) => {
+          ${Object.entries(CHARGE_KINDS).filter(([k]) => !FIRM_KINDS.includes(k)).map(([k, l]) => `<tr><td>${l}${k === "fixed" ? " (£)" : " (%)"}</td>${TYPES.map((t) => {
             const c = (d.charges[t] || []).find((x) => x.kind === k); const v = c ? (k === "fixed" ? c.amount : c.rate) : 0;
             return `<td>${k === "fixed" ? `<input type="number" step="1" data-cf="${t}" value="${v || 0}" style="width:70px">` : pctIn(`data-cp="${t}:${k}"`, v, 70)}</td>`; }).join("")}</tr>`).join("")}
-          <tr><th>Total %</th>${TYPES.map((t) => `<th>${pct((d.charges[t] || []).reduce((a, c) => a + (c.rate || 0), 0))}%</th>`).join("")}</tr></table></div></div>
+          <tr><td>Platform tiers</td>${TYPES.map((t) => { const c = (d.charges[t] || []).find((x) => x.kind === "platform") || {};
+            return `<td><input data-ctier="${t}" value="${esc(tiersText(c))}" placeholder="none" style="width:150px"><br><select data-ctb="${t}" style="margin-top:2px"><option value="banded" ${c.tier_basis !== "whole" ? "selected" : ""}>Each slice</option><option value="whole" ${c.tier_basis === "whole" ? "selected" : ""}>Whole value</option></select></td>`; }).join("")}</tr>
+          <tr><th>Total % before adviser charge</th>${TYPES.map((t) => `<th>${pct((d.charges[t] || []).filter((c) => !FIRM_KINDS.includes(c.kind)).reduce((a, c) => a + chargeRate(c, 0), 0))}%</th>`).join("")}</tr></table></div></div>
+        <div class="panel"><h2>Our fees (products we manage only)</h2>
+          <p class="muted" style="font-size:12px">These apply only to pots ticked as "Managed by us" on a plan. The initial fee is taken once, at the start of the plan, on pots being transferred in.</p>
+          <div class="row"><div><label>Initial fee on transfers %</label>${pctIn('id="s_initfee"', d.initial_fee)}</div>
+          <div><label>Ongoing adviser fee % a year</label>${pctIn('id="s_ongfee"', d.ongoing_fee)}</div></div></div>
       </div>
       <div>
         <div class="panel"><h2>General</h2><div class="row">
@@ -638,13 +762,15 @@ async function settingsView() {
           <div><label>Current account %</label>${pctIn('id="s_cur"', d.current_account_return)}</div></div></div>
         <div class="panel"><h2>Pensions and State Pension</h2><div class="row">
           <div><label>Pension tax</label><select id="s_ptm"><option value="uk" ${d.pension_tax_mode === "uk" ? "selected" : ""}>UK income tax</option><option value="flat" ${d.pension_tax_mode === "flat" ? "selected" : ""}>Flat rate</option></select></div>
-          <div><label>Default withdrawal method</label><select id="s_pwm">${Object.entries(METHODS).map(([k, l]) => `<option value="${k}" ${k === d.pension_withdrawal_method ? "selected" : ""}>${l}</option>`).join("")}</select></div></div>
+          <div><label>Default withdrawal method</label><select id="s_pwm">${Object.entries(METHODS).map(([k, l]) => `<option value="${k}" ${k === d.pension_withdrawal_method ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+          <div><label>GIA tax</label><select id="s_gtm"><option value="cgt" ${d.gia_tax_mode === "cgt" ? "selected" : ""}>Capital Gains Tax</option><option value="flat" ${d.gia_tax_mode === "flat" ? "selected" : ""}>Flat rate</option></select></div></div>
           <div class="row" style="margin-top:8px"><div><label>Full new State Pension (£ a week)</label><input type="number" step="0.01" id="s_sp" value="${d.full_state_pension_weekly}"></div>
           <div><label>State Pension increase % (blank = inflation)</label><input type="number" step="0.01" id="s_spi" value="${d.state_pension_increase == null ? "" : pct(d.state_pension_increase)}"></div></div></div>
         <div class="panel"><h2>Model portfolios</h2>
-          <table class="edit"><tr><th>Portfolio</th><th>ATR</th><th></th></tr>
+          <table class="edit"><tr><th>Portfolio</th><th>ATR</th><th>DFM %</th><th>Ongoing costs %</th><th>Transaction %</th><th></th></tr>
           ${d.portfolios.map((p, i) => `<tr><td><input data-pn="${i}" value="${esc(p.name)}"></td>
             <td><select data-pa="${i}" style="min-width:120px">${atrOptions(d, p.atr)}</select></td>
+            <td>${pctIn(`data-pdfm="${i}"`, p.dfm || 0, 65)}</td><td>${pctIn(`data-pocf="${i}"`, p.ongoing_costs || 0, 65)}</td><td>${pctIn(`data-ptx="${i}"`, p.transaction || 0, 65)}</td>
             <td><button class="small danger" data-pd="${i}">✕</button></td></tr>`).join("")}</table>
           <p><button class="small ghost" id="addP">+ Add portfolio</button></p></div>
         <div class="panel"><h2>Fixed-rate products</h2>
@@ -655,6 +781,10 @@ async function settingsView() {
           <p><button class="small ghost" id="addX">+ Add product</button></p></div>
       </div>
     </div>
+    <div class="panel" id="s_plat"><h2>Platform charges</h2>
+      <p class="muted" style="font-size:12px">New clients get a copy of these, which can then be changed for that client on the plan's Platforms tab.</p>
+      <div class="row"><div><label>Default platform for new invested accounts</label><select id="s_defplat"><option value="">None</option>${d.platforms.map((p) => `<option ${p.name === d.default_platform ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select></div></div>
+      ${platformsEditor(d.platforms)}</div>
     <div class="panel"><div class="row"><div style="flex:3"><label>Note for the audit trail</label><input id="s_note" placeholder="What changed and why"></div>
       <div><button id="s_save">Save defaults</button></div><div><button class="ghost" id="s_reset">Reset to original</button></div></div>
       <p id="s_msg" class="muted"></p></div>`;
@@ -670,18 +800,27 @@ async function settingsView() {
       d.pension_tax_mode = document.getElementById("s_ptm").value; d.pension_withdrawal_method = document.getElementById("s_pwm").value;
       d.full_state_pension_weekly = +document.getElementById("s_sp").value;
       const spi = document.getElementById("s_spi").value; d.state_pension_increase = spi === "" ? null : +spi / 100;
+      d.default_platform = document.getElementById("s_defplat").value || null;
+      d.initial_fee = num("#s_initfee"); d.ongoing_fee = num("#s_ongfee"); d.gia_tax_mode = document.getElementById("s_gtm").value;
       TYPES.forEach((t) => {
-        const list = Object.keys(CHARGE_KINDS).filter((k) => k !== "fixed").map((k) => ({ kind: k, rate: num(`[data-cp="${t}:${k}"]`), amount: 0, name: null }));
+        const list = Object.keys(CHARGE_KINDS).filter((k) => k !== "fixed").map((k) => {
+          if (FIRM_KINDS.includes(k)) return { kind: k, rate: d.ongoing_fee, amount: 0, name: null };
+          const c = { kind: k, rate: num(`[data-cp="${t}:${k}"]`), amount: 0, name: null };
+          if (k === "platform") { c.tiers = parseTiers(document.querySelector(`[data-ctier="${t}"]`).value); c.tier_basis = document.querySelector(`[data-ctb="${t}"]`).value; }
+          return c;
+        });
         list.push({ kind: "fixed", rate: 0, amount: +document.querySelector(`[data-cf="${t}"]`).value || 0, name: null });
-        d.charges[t] = list.filter((c) => c.rate || c.amount || ["pension", "isa", "gia"].includes(t));
+        d.charges[t] = list.filter((c) => (["pension", "isa", "gia"].includes(t) ? true : (c.rate || c.amount || c.tiers) && !FIRM_KINDS.includes(c.kind)));
       });
-      d.portfolios = d.portfolios.map((p, i) => ({ name: document.querySelector(`[data-pn="${i}"]`).value.trim(), atr: +document.querySelector(`[data-pa="${i}"]`).value })).filter((p) => p.name);
+      d.portfolios = d.portfolios.map((p, i) => ({ name: document.querySelector(`[data-pn="${i}"]`).value.trim(), atr: +document.querySelector(`[data-pa="${i}"]`).value,
+        dfm: num(`[data-pdfm="${i}"]`), ongoing_costs: num(`[data-pocf="${i}"]`), transaction: num(`[data-ptx="${i}"]`) })).filter((p) => p.name);
       const prods = {};
       Object.keys(d.product_returns).forEach((_, i) => { const n = document.querySelector(`[data-xn="${i}"]`).value.trim(); if (n) prods[n] = num(`[data-xr="${i}"]`); });
       d.product_returns = prods;
     }
-    document.querySelectorAll("[data-cp],[data-ace]").forEach((i) => (i.onchange = () => { collect(); render(); }));
-    document.getElementById("addP").onclick = () => { collect(); d.portfolios.push({ name: "New portfolio", atr: d.default_atr }); render(); };
+    document.querySelectorAll("[data-cp],[data-ace],[data-ctier],[data-ctb]").forEach((i) => (i.onchange = () => { collect(); render(); }));
+    bindPlatforms(d.platforms, document.getElementById("s_plat"), (rerender) => { if (rerender) { collect(); render(); } });
+    document.getElementById("addP").onclick = () => { collect(); d.portfolios.push({ name: "New portfolio", atr: d.default_atr, dfm: 0, ongoing_costs: 0, transaction: 0 }); render(); };
     document.getElementById("addX").onclick = () => { collect(); d.product_returns["New product"] = 0; render(); };
     document.querySelectorAll("[data-pd]").forEach((b) => (b.onclick = () => { collect(); d.portfolios.splice(+b.dataset.pd, 1); render(); }));
     document.querySelectorAll("[data-xd]").forEach((b) => (b.onclick = () => { collect(); delete d.product_returns[Object.keys(d.product_returns)[+b.dataset.xd]]; render(); }));
