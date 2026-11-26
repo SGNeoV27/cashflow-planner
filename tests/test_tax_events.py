@@ -202,7 +202,7 @@ def test_itemised_charges_and_net_return():
     assert r.charges_by_type["Platform charge"] == pytest.approx(500)
     assert r.charges_by_type["Ongoing adviser charge"] == pytest.approx(1_000)
     assert r.charges_by_type["Fixed annual fee"] == pytest.approx(100)
-    assert f.pot_rates["isa"] == {"gross": 0.05, "charges": pytest.approx(0.0095), "net": pytest.approx(0.0405),
+    assert f.pot_rates["isa"] == {"gross": 0.05, "charges": pytest.approx(0.0095), "net": pytest.approx(0.0405), "platform": 0.0,
                                   "fixed_fees": 100}
     # Charges are on the current value, not the original investment.
     assert f.rows[1].pots["isa"].charges_by_type["Platform charge"] == pytest.approx(r.closing * 0.0025)

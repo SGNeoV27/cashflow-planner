@@ -11,6 +11,7 @@ import copy
 from dataclasses import dataclass, field
 
 from .models import Charge
+from .platforms import Platform, default_platforms
 
 SCENARIOS = ("lower", "central", "upper")
 
@@ -61,7 +62,7 @@ PORTFOLIO_ALIASES = {f"Tatton Classic Core - {m}": f"Tatton Classic {m}"
                      for m in ("Defensive", "Cautious", "Balanced", "Active", "Aggressive")}
 
 # Bump when the built-in defaults change in a way saved settings should pick up.
-DEFAULTS_VERSION = 2
+DEFAULTS_VERSION = 3
 
 
 def _platform() -> Charge:
@@ -97,6 +98,9 @@ class FirmDefaults:
     initial_fee: float = 0.03  # one-off, on transfers in
     ongoing_fee: float = 0.01  # ongoing adviser charge
     gia_tax_mode: str = "cgt"  # general investment accounts: Capital Gains Tax on gains
+    # Platform charge tables (tiers on the client's total value, wrapper fees).
+    platforms: list[Platform] = field(default_factory=default_platforms)
+    default_platform: str | None = None
     # Pensions are taxed under UK income tax; other pots can have a flat rate.
     tax: dict[str, float] = field(default_factory=dict)
     pension_tax_mode: str = "uk"
@@ -178,7 +182,15 @@ class FirmDefaults:
                         if c.kind == "adviser" and c.rate == 0:
                             c.rate = fresh.ongoing_fee
             self.version = 2
+        if self.version < 3:
+            if not self.platforms:
+                self.platforms = default_platforms()
+            self.version = 3
         return self
+
+    def platforms_snapshot(self) -> list[Platform]:
+        """The platform tables as copied onto a new plan."""
+        return copy.deepcopy(self.platforms)
 
     def atr_returns_snapshot(self) -> dict:
         """The ATR table as stored on a plan's assumptions."""

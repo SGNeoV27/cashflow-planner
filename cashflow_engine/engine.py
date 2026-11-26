@@ -40,6 +40,7 @@ from dataclasses import dataclass, field
 from datetime import date
 
 from .models import Charge, Frequency, Plan, Pot, PotType
+from .platforms import default_platforms, platform_charges
 from .tax import capital_gains_tax, income_tax
 
 
@@ -179,6 +180,14 @@ def gross_growth(pot: Pot, plan: Plan) -> float:
 
 
 INITIAL_FEE = "Initial fee (transfer)"
+PLATFORM_CHARGE = "Platform charge"
+WRAPPER_FEE = "Platform wrapper fee"
+
+
+def plan_platforms(plan: Plan) -> dict:
+    """The platform tables this plan uses: its own copy, or the built-in ones."""
+    items = plan.assumptions.platforms or default_platforms()
+    return {p.name: p for p in items}
 
 
 def _charges(pot: Pot) -> list[Charge]:
@@ -199,6 +208,7 @@ def project(plan: Plan) -> Forecast:
     # Base cost for CGT. It is a cash amount, so it shrinks in today's terms each year.
     base: dict[str, float] = {p.id: float(p.value if p.cost_basis is None else p.cost_basis) for p in plan.pots}
     rates = {pid: gross_growth(p, plan) for pid, p in pots.items()}
+    platforms = plan_platforms(plan)
     overdraft = 0.0
     lsa_left = rules.lump_sum_allowance  # today's terms; shrinks with inflation as it is frozen
     start_age = age_on(dob, plan.start_date)
@@ -227,6 +237,7 @@ def project(plan: Plan) -> Forecast:
             bal[pid] = new
 
         # 1. Charges.
+        plat_pct, plat_fees = platform_charges(plan.pots, {pid: py.opening for pid, py in pys.items()}, platforms)
         for pid, pot in pots.items():
             if bal[pid] <= 0:
                 continue
@@ -235,6 +246,13 @@ def project(plan: Plan) -> Forecast:
                 scale_pot(pid, bal[pid] - amt)
                 pys[pid].charges += amt
                 pys[pid].charges_by_type[INITIAL_FEE] = amt
+            plat = [(PLATFORM_CHARGE, plat_pct.get(pid, 0.0) * f), (WRAPPER_FEE, plat_fees.get(pid, 0.0) * f)]
+            for label, amt in plat:
+                amt = min(amt, bal[pid])
+                if amt > 0:
+                    scale_pot(pid, bal[pid] - amt)
+                    pys[pid].charges += amt
+                    pys[pid].charges_by_type[label] = pys[pid].charges_by_type.get(label, 0.0) + amt
             for c in _charges(pot):
                 amt = min(c.percent_on(pys[pid].opening) * f + c.amount * f, bal[pid])
                 if amt <= 0:
@@ -514,9 +532,11 @@ def project(plan: Plan) -> Forecast:
 
     final = rows[-1].savings_end if rows else sum(bal.values())
     pot_rates = {}
+    start_pct, start_fees = platform_charges(plan.pots, {p.id: p.value for p in plan.pots}, platforms)
     for pid, pot in pots.items():
         gross = rates[pid]
-        pct = pot.percent_charges()
+        pct = pot.percent_charges() + (start_pct.get(pid, 0.0) / pot.value if pot.value > 0 else 0.0)
         pot_rates[pid] = {"gross": gross, "charges": pct, "net": gross - pct,
-                          "fixed_fees": sum(c.amount for c in _charges(pot))}
+                          "platform": start_pct.get(pid, 0.0) / pot.value if pot.value > 0 else 0.0,
+                          "fixed_fees": sum(c.amount for c in _charges(pot)) + start_fees.get(pid, 0.0)}
     return Forecast(plan_name=plan.name, rows=rows, final_age=a.end_age, final_savings=final, pot_rates=pot_rates)

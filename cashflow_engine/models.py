@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from enum import Enum
 
+from .platforms import Platform
 from .tax import TaxRules
 
 
@@ -155,12 +156,17 @@ class Pot:
     # General investment accounts: "cgt" taxes gains on withdrawals. The base
     # cost is what was paid in (None = same as today's value, so no gain yet).
     cost_basis: float | None = None
+    # Investment platform (e.g. "Aviva"): its tiered charges on the client's
+    # total value there replace any "platform" charge in ``charges``.
+    platform: str | None = None
+    wrapper: str | None = None  # e.g. "isa", "pension_choice"; None = from the pot type
 
     def active_charges(self) -> list[Charge]:
         """Ongoing charges that apply: the firm's own only on managed products."""
         items = self.charges or ([Charge("other", rate=self.charge_rate, name="Ongoing charges")]
                                  if self.charge_rate else [])
-        return [c for c in items if self.managed or c.kind not in FIRM_CHARGE_KINDS]
+        return [c for c in items if (self.managed or c.kind not in FIRM_CHARGE_KINDS)
+                and not (self.platform and c.kind == "platform")]
 
     def percent_charges(self, value: float | None = None) -> float:
         """Total % charges a year, at ``value`` (default: today's value) for tiered charges."""
@@ -266,6 +272,8 @@ class Assumptions:
     atr_returns: dict = field(default_factory=dict)
     return_scenario: str = "central"  # "lower" | "central" | "upper"
     tax_rules: TaxRules = field(default_factory=TaxRules)
+    # Platform charge tables used by this plan (a copy of the firm's, editable per client).
+    platforms: list[Platform] = field(default_factory=list)
 
 
 @dataclass

@@ -313,6 +313,8 @@ def _investments(data: ReportData, st, width):
     for r in pots:
         charges = pct(r["charges"]) + (f" + {money(r['fixed'])}" if r["fixed"] else "")
         name = r["name"] + (" <font color='#8A1C3D'>*</font>" if r["managed"] else "")
+        if r["platform"]:
+            name += f"<br/><font size='7' color='#555555'>on {r['platform']}</font>"
         rows.append([Paragraph(name, st["cell"]), r["type"], money(r["value"]),
                      Paragraph(r["basis"], st["cell"]), pct(r["gross"]), charges, pct(r["net"])])
     rows.append(["Total", "", money(sum(r["value"] for r in pots)), "", "", "", ""])

@@ -134,7 +134,8 @@ def create_client(body: dict = Body(...)):
                   growth_rate=defaults.current_account_return)],
         withdrawal_order=["current"],
         assumptions=Assumptions(inflation=defaults.inflation, end_age=defaults.end_age,
-                                atr_returns=defaults.atr_returns_snapshot(), return_scenario=defaults.return_scenario),
+                                atr_returns=defaults.atr_returns_snapshot(), return_scenario=defaults.return_scenario,
+                                platforms=defaults.platforms_snapshot()),
     )
     cid = store().create_client(body["name"])
     store().save_plan(cid, plan, "Created")
