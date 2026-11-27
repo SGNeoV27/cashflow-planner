@@ -346,6 +346,7 @@ def parse_cashcalc(text: str) -> FactFind:
                         kind = _holding_kind(provider, OTHER_KINDS)
                     plain = t.lower() in provider.lower() or t.lower() in ("other", "cash")
                     name = (provider if plain else f"{provider} {t}").strip() or t
+                    name = name[:1].upper() + name[1:]  # "various ISA" -> "Various ISA"
                     h = FFHolding(kind=kind, name=name, value=value, provider=provider or None,
                                   owner=r.get("Owner") or None, reference=ref)
                     if any(x.name == h.name and x.value == h.value and x.owner == h.owner for x in ff.holdings):

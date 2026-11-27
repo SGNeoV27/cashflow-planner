@@ -93,12 +93,18 @@ class ReportData:
     def key_figures(self) -> list[tuple[str, str]]:
         f, t = self.forecast, self.forecast.totals()
         run_out = f.assets_depletion_age()
+        ret = self.plan.client.retirement_age
+        at_ret = ([(f"Savings at retirement (age {ret})", money(f.savings_at_age(ret)))]
+                  if ret and self.age_now < ret <= f.final_age else [])
+        flat = t["tax"] - t["income_tax"] - t["cgt"]
         return [
             ("Savings and investments today", money(sum(p.value for p in self.plan.pots))),
+            *at_ret,
             (f"Savings at age {f.final_age}", money(f.final_savings)),
             ("Money lasts", "Throughout the plan" if run_out is None else f"Runs out at age {run_out}"),
             ("Total income tax", money(t["income_tax"])),
             *([("Total Capital Gains Tax", money(t["cgt"]))] if t["cgt"] else []),
+            *([("Tax at flat rates on withdrawals", money(flat))] if flat > 0.5 else []),
             ("Total tax-free cash taken", money(t["tax_free_cash"])),
             ("Total charges", money(t["charges"])),
             ("Total life event costs", money(t["events"])),
