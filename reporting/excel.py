@@ -96,6 +96,10 @@ def render_xlsx(data: ReportData) -> bytes:
             ("Income tax", MONEY, 12), ("Capital gains", MONEY, 13), ("CGT", MONEY, 11), ("All tax", MONEY, 12), ("Tax-free cash", MONEY, 13),
             ("Surplus / deficit", MONEY, 14), ("Unfunded shortfall", MONEY, 14), ("Overdraft", MONEY, 12),
             ("Savings at end", MONEY, 15)]
+    people = list(f.rows[0].tax_by_person) if (f.rows and p.partner) else []
+    for who in people:
+        n = f.rows[0].tax_by_person[who]["name"]
+        cols += [(f"{n} taxable income", MONEY, 15), (f"{n} income tax", MONEY, 13), (f"{n} CGT", MONEY, 11)]
     pot_cols = [(f"{pt.name} at end", MONEY, 16) for pt in p.pots]
     rows = []
     for r in f.rows:
@@ -103,6 +107,8 @@ def render_xlsx(data: ReportData) -> bytes:
                      r.drawn_for_shortfall_net, r.total_expenses - r.event_costs, r.event_costs,
                      r.total_contributions, r.total_charges, r.taxable_income, r.income_tax, r.capital_gains, r.cgt, r.tax_paid,
                      r.tax_free_cash, r.surplus_deficit, r.unfunded_shortfall, r.overdraft, r.savings_end]
+                    + [x for who in people for x in (r.tax_by_person[who]["taxable_income"],
+                                                     r.tax_by_person[who]["income_tax"], r.tax_by_person[who]["cgt"])]
                     + [r.pots[pt.id].closing for pt in p.pots])
     _sheet(wb, "Year by year", "Year-by-year cashflow (today's money)", cols + pot_cols, rows)
 

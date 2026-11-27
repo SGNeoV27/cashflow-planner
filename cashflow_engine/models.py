@@ -191,6 +191,10 @@ class CashflowItem:
     # Optional exact dates; they override the ages and pro-rate the year they fall in.
     start_date: date | None = None
     end_date: date | None = None
+    # Whose it is: "client", "partner" or "joint" (None = the client). It decides
+    # whose income tax it counts towards, and a partner's item uses the
+    # partner's age for start_age and end_age.
+    owner: str | None = None
 
     def active(self, age: int) -> bool:
         if self.frequency == Frequency.ONE_OFF:
@@ -298,3 +302,17 @@ class Plan:
             if p.id == pot_id:
                 return p
         raise KeyError(f"No pot with id {pot_id!r}")
+
+
+def owner_role(owner: str | None, plan: "Plan") -> str:
+    """Normalise an owner ("client", "partner", "joint", or a person's name) to a role."""
+    if not owner:
+        return "client"
+    o = owner.strip().lower()
+    if o in ("client", "partner", "joint"):
+        return o if (o == "client" or plan.partner) else "client"
+    if plan.partner:
+        names = plan.partner.name.lower().split()
+        if o == plan.partner.name.lower() or (names and o == names[0]):
+            return "partner"
+    return "client"

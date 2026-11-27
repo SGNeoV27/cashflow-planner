@@ -261,6 +261,7 @@ function bindPlatforms(list, root, changed) {
 }
 
 // ---------------------------------------------------------------- plan editor
+const OWNER_TABS = ["pots", "incomes", "expenses", "contributions", "withdrawals", "events"];
 const ITEM_COLS = [
   ["name", "Description", "text"], ["amount", "Amount £", "num"], ["frequency", "Frequency", FREQS],
   ["start_age", "From age", "int"], ["end_age", "To age", "int?"], ["inflation", "Increase %", "pct?"], ["category", "Category", "text?"]];
@@ -371,6 +372,7 @@ async function planView(cid, name) {
           <div><label>Return scenario</label><select data-k="assumptions.return_scenario" data-t="text"><option value="lower">Lower</option><option value="central">Central</option><option value="upper">Upper</option></select></div>
           <div><label><input type="checkbox" data-k="client.scottish_taxpayer" data-t="bool"> Scottish taxpayer</label>
             <span class="muted" style="font-size:12px">Tax year ${esc(plan.assumptions.tax_rules?.tax_year || "")}</span></div></div>
+          <div id="partnerBox" style="margin-top:8px"></div>
           <div class="row" style="margin-top:8px">
           <div><label>Inflation: <b id="inflOut"></b></label><input type="range" min="0" max="8" step="0.1" data-k="assumptions.inflation" data-t="pct"></div>
           <div><label>Plan to age</label><input type="number" data-k="assumptions.end_age" data-t="int"></div></div>
@@ -426,19 +428,37 @@ async function planView(cid, name) {
     if (t === "num") return +v || 0;
     if (t === "num?") return v === "" ? null : +v;
     if (t === "bool") return el.checked;
-    if (t === "pot" || t === "pot?" || t === "portfolio" || t === "product" || t === "date?" || t === "platform" || t === "wrapper") return v || null;
+    if (t === "pot" || t === "pot?" || t === "portfolio" || t === "product" || t === "date?" || t === "platform" || t === "wrapper" || t === "owner") return v || null;
     if (t === "inflbool") return el.checked ? null : 0;
     if (t === "growth") return v === "" ? 0 : +v / 100;
     if (t === "atr") return v === "" ? null : +v;
     return v === "" && t === "text?" ? null : v;
   };
+  function renderPartner() {
+    const box = document.getElementById("partnerBox"), pt = plan.partner;
+    box.innerHTML = pt ? `<div class="row">
+          <div><label>Partner's name</label><input data-k="partner.name" data-t="text"></div>
+          <div><label>Partner's date of birth</label><input type="date" data-k="partner.date_of_birth"></div>
+          <div><label>Partner's retirement age</label><input type="number" data-k="partner.retirement_age" data-t="int?"></div></div>
+          <div class="row" style="margin-top:8px">
+          <div><label>Partner's State Pension age</label><input type="number" data-k="partner.state_pension_age" data-t="int?"></div>
+          <div><label><input type="checkbox" data-k="partner.scottish_taxpayer" data-t="bool"> Partner is a Scottish taxpayer</label></div>
+          <div><button class="small ghost" id="rmPartner">Remove partner</button></div></div>
+          <p class="muted" style="font-size:12px;margin:4px 0 0">Each person is taxed on their own income; joint items are split equally. Use the "Whose" column to say who owns each item; a partner's items use the partner's age for From and To age.</p>`
+      : `<button class="small ghost" id="addPartner">+ Add a partner (taxed separately)</button>`;
+    const add = document.getElementById("addPartner"), rm = document.getElementById("rmPartner");
+    if (add) add.onclick = () => { plan.partner = { name: "Partner", date_of_birth: plan.client.date_of_birth, retirement_age: plan.client.retirement_age,
+      state_pension_age: plan.client.state_pension_age, life_expectancy: null, scottish_taxpayer: plan.client.scottish_taxpayer }; renderPartner(); bindFields(); renderTab(); refresh(); };
+    if (rm) rm.onclick = () => { plan.partner = null; renderPartner(); renderTab(); refresh(); };
+  }
+  renderPartner();
   function bindFields() {
     document.querySelectorAll("[data-k]").forEach((el) => {
       const k = el.dataset.k, t = el.dataset.t;
       if (t === "pot") el.innerHTML = `<option value="">(none)</option>` + plan.pots.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("");
       const v = get(k);
       if (t === "bool") el.checked = !!v; else el.value = t === "pct" ? pct(v) : v ?? "";
-      el.oninput = el.onchange = () => { set(k, read(el, t)); if (k === "assumptions.return_scenario") renderTab(); refresh(); };
+      el.oninput = el.onchange = () => { set(k, read(el, t)); if (k === "assumptions.return_scenario" || k === "partner.name") renderTab(); refresh(); };
     });
   }
   bindFields();
@@ -471,13 +491,17 @@ async function planView(cid, name) {
       });
       return;
     }
-    const spec = SPECS[tab], rows = (plan[tab] ||= []);
+    const spec0 = SPECS[tab], rows = (plan[tab] ||= []);
+    const spec = plan.partner && OWNER_TABS.includes(tab) ? { ...spec0, cols: [spec0.cols[0], ["owner", "Whose", "owner"], ...spec0.cols.slice(1)] } : spec0;
     const potOpts = (v) => plan.pots.map((p) => `<option value="${esc(p.id)}" ${p.id === v ? "selected" : ""}>${esc(p.name)}</option>`).join("");
     const cell = (r, i, [k, , t]) => {
       const v = r[k], at = `data-r="${i}" data-c="${k}"`;
       if (Array.isArray(t)) return `<select ${at}>${t.map((o) => `<option ${o === v ? "selected" : ""} value="${o}">${esc(POT_LABELS[o] || label(o))}</option>`).join("")}</select>`;
       if (t && typeof t === "object") return `<select ${at}>${Object.entries(t).map(([o, l]) => `<option ${o === (v ?? "") ? "selected" : ""} value="${o}">${esc(l)}</option>`).join("")}</select>`;
       if (t === "pot") return `<select ${at}>${potOpts(v)}</select>`;
+      if (t === "owner") { const first = (n) => esc((n || "").split(" ")[0] || n || ""); const cur = v || "client";
+        return `<select ${at}>${[["client", first(plan.client.name) || "Client"], ["partner", first(plan.partner.name) || "Partner"], ["joint", "Joint"]]
+          .map(([o, l]) => `<option value="${o}" ${o === cur ? "selected" : ""}>${l}</option>`).join("")}</select>`; }
       if (t === "pot?") return `<select ${at}><option value="">Cashflow (withdrawal order)</option>${potOpts(v)}</select>`;
       if (t === "date?") return `<input type="date" ${at} value="${esc(v ?? "")}" style="width:140px">`;
       if (t === "inflbool") return `<input type="checkbox" ${at} ${v == null ? "checked" : ""}>`;
@@ -624,6 +648,18 @@ async function planView(cid, name) {
       onClick: (e, els) => { if (els.length) selectYear(els[0].index); } } });
   }
   function selectYear(i) { selected = i; document.querySelectorAll("#years tr[data-i]").forEach((tr) => tr.classList.toggle("sel", +tr.dataset.i === i)); showDetail(i); }
+  function bandText(bands) { return bands.map(([n, rate, amt, t]) => `${esc(n)} ${pct(rate)}% on ${gbp(amt)} = ${gbp(t)}`).join("; "); }
+  function personTax(r) {
+    const people = Object.values(r.tax_by_person || {});
+    if (people.length < 2) return r.tax_bands.length ? `<p class="muted" style="font-size:12px">Income tax: ${bandText(r.tax_bands)}</p>` : "";
+    const row = (n, p, b) => `<tr><td>${b ? "<b>" + n + "</b>" : esc(n)}</td><td class="num">${gbp(p.taxable_income)}</td><td class="num">${gbp(p.income_tax)}</td>
+      <td class="num">${gbp(p.capital_gains)}</td><td class="num">${gbp(p.cgt)}</td><td class="num">${gbp(p.tax_free_cash)}</td></tr>`;
+    return `<h3 style="margin:10px 0 4px">Tax by person</h3><div class="scroll"><table class="detail"><tr><th></th><th class="num">Taxable income</th><th class="num">Income tax</th>
+      <th class="num">Gains</th><th class="num">CGT</th><th class="num">Tax-free cash</th></tr>
+      ${people.map((p) => row(p.name, p)).join("")}
+      ${row("Household", { taxable_income: r.taxable_income, income_tax: r.income_tax, capital_gains: r.capital_gains, cgt: r.cgt, tax_free_cash: r.tax_free_cash }, true)}</table></div>
+      ${people.filter((p) => p.bands.length).map((p) => `<p class="muted" style="font-size:12px;margin:2px 0">${esc(p.name)}: ${bandText(p.bands)}</p>`).join("")}`;
+  }
   function showDetail(i) {
     const r = forecast.rows[i];
     document.getElementById("detail").innerHTML = `<h2>Age ${r.age} (${r.year}${r.fraction < 1 ? ", part year" : ""})</h2>
@@ -631,7 +667,7 @@ async function planView(cid, name) {
       <div class="kpi"><span>Surplus / shortfall</span><b class="${r.surplus_deficit < 0 ? "neg" : ""}">${gbp(r.surplus_deficit)}</b></div><div class="kpi"><span>Tax</span><b>${gbp(r.tax_paid)}</b></div>
       <div class="kpi"><span>Taxable income</span><b>${gbp(r.taxable_income)}</b></div><div class="kpi"><span>Tax-free cash</span><b>${gbp(r.tax_free_cash)}</b></div></div>
       ${r.events.length ? `<p><b>Life events:</b> ${r.events.map((e) => `${esc(e.name)} ${gbp(e.amount)}${e.pot_id ? ` from ${esc(forecast.pot_names[e.pot_id] || "")}` : ""}`).join("; ")}</p>` : ""}
-      ${r.tax_bands.length ? `<p class="muted" style="font-size:12px">Income tax: ${r.tax_bands.map(([n, rate, amt, t]) => `${esc(n)} ${pct(rate)}% on ${gbp(amt)} = ${gbp(t)}`).join("; ")}</p>` : ""}
+      ${personTax(r)}
       <div class="scroll"><table class="detail"><tr><th>Pot</th><th class="num">Opening</th><th class="num">Charges</th><th class="num">Paid in</th><th class="num">Withdrawn</th><th class="num">Tax</th><th class="num">Growth</th><th class="num">Closing</th></tr>
       ${Object.entries(r.pots).map(([id, p]) => `<tr><td>${esc(forecast.pot_names[id])}</td><td class="num">${gbp(p.opening)}</td>
         <td class="num" title="${esc(Object.entries(p.charges_by_type).map(([k, v]) => `${k}: ${gbp(v)}`).join("\n"))}">${gbp(p.charges)}</td>

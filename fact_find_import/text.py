@@ -43,9 +43,24 @@ def parse_date(text: str | None) -> date | None:
     if not text:
         return None
     t = _ORDINAL.sub(r"\1", text.strip()).replace(",", "")
-    for fmt in ("%d/%m/%Y", "%d %B %Y", "%d %b %Y", "%Y-%m-%d", "%d %B %Y %I:%M%p"):
+    for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%d %B %Y", "%d %b %Y", "%Y-%m-%d", "%d %B %Y %I:%M%p"):
         try:
             return datetime.strptime(t, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def month_year(text: str | None) -> date | None:
+    """'December 2026' or 'Mar 2027' as the first of that month."""
+    if not text:
+        return None
+    m = re.search(r"([A-Za-z]{3,9})\.?\s+(\d{4})", text)
+    if not m:
+        return None
+    for fmt in ("%B %Y", "%b %Y"):
+        try:
+            return datetime.strptime(f"{m.group(1)} {m.group(2)}", fmt).date()
         except ValueError:
             continue
     return None
