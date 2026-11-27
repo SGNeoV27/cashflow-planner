@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 from datetime import date
 
+from cashflow_engine.models import apply_basis
 from cashflow_engine import Assumptions, Expense, FirmDefaults, Frequency, Income, Person, Plan, Pot, PotType
 
 from .factfind import FactFind
@@ -42,8 +43,9 @@ def _product(name: str, products: dict[str, float]) -> str | None:
 
 
 def to_plan(ff: FactFind, start_date: date, date_of_birth: date | None = None,
-            defaults: FirmDefaults | None = None, atr: int | None = None) -> Plan:
+            defaults: FirmDefaults | None = None, atr: int | None = None, basis: str | None = None) -> Plan:
     d = defaults or FirmDefaults()
+    basis = basis or d.default_basis
     atr = atr if atr is not None else d.default_atr
     if not ff.clients:
         raise ValueError("The fact find has no client")
@@ -118,10 +120,18 @@ def to_plan(ff: FactFind, start_date: date, date_of_birth: date | None = None,
     # Gross pension, employment and rental income is taxable; amounts given net are
     # already after tax, so they aren't taxed again.
     taxable_kinds = {"employment", "self_employment", "state_pension", "db_pension", "rental"}
-    incomes = [Income(i.name, i.amount, Frequency(i.frequency), start_age=start_for(i.owner), category=i.category,
-                      end_date=until(i), kind=i.kind or "other", owner=role(i.owner),
-                      taxable=(i.net is False and (i.kind or "other") in taxable_kinds))
-               for i in current(ff.incomes, "Incomes")]
+    def income(i) -> Income:
+        amount, freq, taxable = i.amount, i.frequency, i.net is False and (i.kind or "other") in taxable_kinds
+        if basis == "net" and taxable:
+            if i.net_amount is not None:
+                amount, freq = i.net_amount, i.net_frequency or i.frequency
+            else:
+                ff.warn(f"Incomes: {i.name} is given before tax; a net forecast needs the take-home "
+                        f"amount, so please enter it")
+        return Income(i.name, amount, Frequency(freq), start_age=start_for(i.owner), category=i.category,
+                      end_date=until(i), kind=i.kind or "other", owner=role(i.owner), taxable=taxable)
+
+    incomes = [income(i) for i in current(ff.incomes, "Incomes")]
 
     rank = {k: n for n, k in enumerate(d.withdrawal_order)}
     order = [p.id for p in sorted(pots, key=lambda p: rank.get(p.type.value, 99))]
@@ -131,6 +141,9 @@ def to_plan(ff: FactFind, start_date: date, date_of_birth: date | None = None,
         p2 = others[0]
         partner = Person(p2.name, p2.date_of_birth, p2.retirement_age, p2.state_pension_age)
 
+    assumptions = apply_basis(
+        Assumptions(inflation=d.inflation, end_age=d.end_age, atr_returns=d.atr_returns_snapshot(),
+                    return_scenario=d.return_scenario, platforms=d.platforms_snapshot()), basis)
     return Plan(
         name="Baseline",
         client=Person(main.name, dob, main.retirement_age, main.state_pension_age),
@@ -140,7 +153,5 @@ def to_plan(ff: FactFind, start_date: date, date_of_birth: date | None = None,
         incomes=incomes,
         expenses=expenses,
         withdrawal_order=order,
-        assumptions=Assumptions(inflation=d.inflation, end_age=d.end_age,
-                                atr_returns=d.atr_returns_snapshot(), return_scenario=d.return_scenario,
-                                platforms=d.platforms_snapshot()),
+        assumptions=assumptions,
     )

@@ -22,7 +22,7 @@ SAMPLE = Path(__file__).parent / "data" / "cashcalc_sample.txt"
 @pytest.fixture(scope="module")
 def plan():
     ff = parse_cashcalc(SAMPLE.read_text())
-    p = to_plan(ff, date(2021, 10, 19), date_of_birth=date(1965, 1, 7), atr=5)
+    p = to_plan(ff, date(2021, 10, 19), date_of_birth=date(1965, 1, 7), atr=5, basis="net")
     for pot in p.pots:
         pot.platform, pot.atr, pot.portfolio, pot.growth_custom = None, None, None, True
         if pot.type == PotType.PENSION:

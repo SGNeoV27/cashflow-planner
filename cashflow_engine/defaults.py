@@ -83,6 +83,8 @@ class FirmDefaults:
     version: int = DEFAULTS_VERSION
     inflation: float = 0.02
     end_age: int = 100
+    # New forecasts are "gross" (UK tax worked out) or "net" (income after tax, flat rates).
+    default_basis: str = "gross"
     # Assumed gross returns (before charges) for each attitude-to-risk score, 1 to 10.
     atr_table: dict[str, AtrReturn] = field(default_factory=_atr_table)
     return_scenario: str = "central"

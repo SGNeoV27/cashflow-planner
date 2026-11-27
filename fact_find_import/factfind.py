@@ -32,6 +32,9 @@ class FFItem:
     timeframe: str | None = None  # as written in the source
     net: bool | None = None
     kind: str | None = None  # incomes: employment | state_pension | db_pension | rental | other ...
+    # A gross income that the fact find also gives net: the net amount and frequency.
+    net_amount: float | None = None
+    net_frequency: str | None = None
 
 
 @dataclass

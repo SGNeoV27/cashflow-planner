@@ -22,7 +22,8 @@ HOLDING_KINDS = [
 ]
 # For "Other" holdings the provider text says what it is.
 OTHER_KINDS = [
-    ("premium bond", "cash"), ("fixed rate bond", "cash"), ("fixed 1 year", "cash"), ("bond", "other"),
+    ("premium bond", "cash"), ("fixed rate bond", "cash"), ("fixed 1 year", "cash"),
+    ("fixed bond", "cash"), ("bond", "other"),
     ("fixed", "cash"), ("saver", "cash"), ("savings", "cash"), ("unit trust", "gia"), ("oeic", "gia"),
 ]
 INCOME_KINDS = [
@@ -210,12 +211,18 @@ def _split_reference(text: str) -> tuple[str, str | None]:
 
 
 def _drop_net_duplicates(ff: FactFind) -> None:
-    """CashCalc often lists a salary both gross and net; keep the gross one."""
-    gross = {(i.name.lower(), i.owner, i.timeframe) for i in ff.incomes if i.net is False}
+    """CashCalc often lists a salary both gross and net; keep the gross one, noting the net amount.
+
+    A gross forecast uses the gross figure; a net forecast uses the net one.
+    """
+    gross = {(i.name.lower(), i.owner, i.timeframe): i for i in ff.incomes if i.net is False}
     keep = []
     for i in ff.incomes:
-        if i.net and (i.name.lower(), i.owner, i.timeframe) in gross:
-            ff.warn(f"Incomes: {i.name} is listed both gross and net; the gross figure was used")
+        g = gross.get((i.name.lower(), i.owner, i.timeframe)) if i.net else None
+        if g is not None:
+            g.net_amount, g.net_frequency = i.amount, i.frequency
+            ff.warn(f"Incomes: {i.name} is listed both gross and net; a gross forecast uses the gross "
+                    f"figure and a net forecast the net one")
             continue
         keep.append(i)
     ff.incomes = keep

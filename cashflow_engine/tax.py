@@ -55,6 +55,13 @@ class TaxRules:
     cgt_annual_exempt: float = 3_000
     cgt_basic_rate: float = 0.18  # on gains within the unused basic rate band
     cgt_higher_rate: float = 0.24
+    # National Insurance on earnings, up to State Pension age (2026/27).
+    # Employees pay Class 1 on salary; the self-employed pay Class 4 on profits.
+    ni_lower: float = 12_570  # primary threshold / lower profits limit
+    ni_upper: float = 50_270  # upper earnings / profits limit
+    ni_employee_main: float = 0.08
+    ni_self_employed_main: float = 0.06
+    ni_upper_rate: float = 0.02
 
 
 @dataclass
@@ -92,15 +99,34 @@ def income_tax(income: float, rules: TaxRules, scottish: bool = False, scale: fl
     return TaxBreakdown(taxable_income=income, personal_allowance=pa, bands=rows, total=total)
 
 
-def capital_gains_tax(gains: float, taxable_income: float, rules: TaxRules, scale: float = 1.0) -> float:
+def capital_gains_tax(gains: float, taxable_income: float, rules: TaxRules, scale: float = 1.0,
+                      exempt_scale: float | None = None) -> float:
     """CGT on a year's gains, added on top of the year's taxable income.
+
+    ``exempt_scale`` scales the annual exempt amount separately: it is fixed in
+    cash terms with no date set for it to rise, so it shrinks every year in
+    today's money.
 
     Gains above the annual exempt amount are taxed at the basic rate while they
     fit in the unused basic rate band, and at the higher rate above it.
     """
-    taxable = max(0.0, gains - rules.cgt_annual_exempt * scale)
+    taxable = max(0.0, gains - rules.cgt_annual_exempt * (scale if exempt_scale is None else exempt_scale))
     if taxable <= 0:
         return 0.0
     band_top = (rules.personal_allowance + rules.bands[0].upper) * scale
     basic = min(taxable, max(0.0, band_top - taxable_income))
     return basic * rules.cgt_basic_rate + (taxable - basic) * rules.cgt_higher_rate
+
+
+def national_insurance(employment: float, self_employment: float, rules: TaxRules, scale: float = 1.0) -> float:
+    """Employee Class 1 NI on a year's salary plus Class 4 NI on self-employed profits.
+
+    Worked out on annual amounts (Class 1 is really per pay period, which gives
+    the same answer for a steady salary). ``scale`` works as for income tax.
+    """
+    lo, hi = rules.ni_lower * scale, rules.ni_upper * scale
+
+    def on(amount: float, main: float) -> float:
+        return max(0.0, min(amount, hi) - lo) * main + max(0.0, amount - hi) * rules.ni_upper_rate
+
+    return on(employment, rules.ni_employee_main) + on(self_employment, rules.ni_self_employed_main)

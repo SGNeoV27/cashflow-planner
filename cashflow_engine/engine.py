@@ -41,7 +41,7 @@ from datetime import date
 
 from .models import Charge, Frequency, Plan, Pot, PotType, owner_role
 from .platforms import default_platforms, platform_charges
-from .tax import capital_gains_tax, income_tax
+from .tax import capital_gains_tax, income_tax, national_insurance
 
 
 @dataclass
@@ -86,6 +86,7 @@ class YearRow:
     tax_free_cash: float = 0.0
     capital_gains: float = 0.0
     cgt: float = 0.0
+    national_insurance: float = 0.0
     event_costs: float = 0.0
     events: list[dict] = field(default_factory=list)
     tax_bands: list = field(default_factory=list)  # the client's bands
@@ -136,6 +137,7 @@ class Forecast:
             "income_tax": sum(r.income_tax for r in self.rows),
             "tax_free_cash": sum(r.tax_free_cash for r in self.rows),
             "cgt": sum(r.cgt for r in self.rows),
+            "ni": sum(r.national_insurance for r in self.rows),
             "events": sum(r.event_costs for r in self.rows),
         }
 
@@ -228,7 +230,10 @@ def project(plan: Plan) -> Forecast:
     # Lump sum allowance, per person, in today's terms; it shrinks with inflation as it is frozen.
     lsa_left = {who: rules.lump_sum_allowance for who in people}
     start_age = age_on(dob, plan.start_date)
-    f0 = first_year_fraction(dob, plan.start_date)
+    whole_years = not getattr(a, "part_first_year", True)
+    # A net forecast takes income as already taxed and taxes each account at its flat rate.
+    net_basis = getattr(a, "basis", "gross") == "net"
+    f0 = 1.0 if whole_years else first_year_fraction(dob, plan.start_date)
     unfreeze = max(0.0, (date(rules.frozen_until, 4, 6) - plan.start_date).days / 365.25)
 
     def index(rate_or_none, elapsed: float) -> float:
@@ -239,12 +244,19 @@ def project(plan: Plan) -> Forecast:
     elapsed = 0.0
     for age in range(start_age, a.end_age):
         f = f0 if age == start_age else 1.0
-        ys = plan.start_date if age == start_age else _birthday(dob, dob.year + age)
-        ye = _birthday(dob, dob.year + age + 1)
+        if whole_years:
+            n = age - start_age
+            ys = _birthday(plan.start_date, plan.start_date.year + n)
+            ye = _birthday(plan.start_date, plan.start_date.year + n + 1)
+        else:
+            ys = plan.start_date if age == start_age else _birthday(dob, dob.year + age)
+            ye = _birthday(dob, dob.year + age + 1)
         savings_start = sum(bal.values()) - overdraft
         pys = {pid: PotYear(opening=bal[pid]) for pid in bal}
         frozen_years = min(elapsed, unfreeze)
         tax_scale = (1 + infl) ** -frozen_years * f
+        # The CGT annual exempt amount has no date to start rising, so it shrinks every year.
+        aea_scale = (1 + infl) ** -elapsed * f
 
         def scale_pot(pid: str, new: float) -> None:
             """Set a pot's balance, keeping its crystallised share in proportion."""
@@ -303,6 +315,18 @@ def project(plan: Plan) -> Forecast:
             p = portion(item)
             return item.annual_amount() * index(item.inflation, elapsed) * p if p else 0.0
 
+        growth_first = getattr(a, "growth_timing", "after_flows") == "on_opening"
+
+        def grow() -> None:
+            for pid in pots:
+                g = bal[pid] * _real(rates[pid], infl, method) * f
+                if bal[pid] + g != bal[pid]:
+                    scale_pot(pid, bal[pid] + g)
+                pys[pid].growth = g
+
+        if growth_first:
+            grow()
+
         # 2. Contributions.
         contributions = contributions_from_cashflow = 0.0
         for c in plan.contributions:
@@ -318,18 +342,31 @@ def project(plan: Plan) -> Forecast:
         # 3. Income and income tax on it.
         income = 0.0
         taxable = {who: 0.0 for who in people}
+        earnings = {who: {"employment": 0.0, "self_employment": 0.0} for who in people}
         for i in plan.incomes:
             amt = amount(i)
             income += amt
-            if i.taxable:
+            if i.taxable and not net_basis:
                 for who, sh in shares(i.owner).items():
                     taxable[who] += amt * sh
+                    if getattr(i, "kind", None) in ("employment", "self_employment"):
+                        earnings[who][i.kind] += amt * sh
+
+        def below_spa(who: str) -> bool:
+            p = people[who]
+            return age_on(p.date_of_birth, ys) < (p.state_pension_age or 67)
+
+        # National Insurance is paid on earnings until State Pension age; it is
+        # scaled by the year fraction like the thresholds.
+        ni = {who: national_insurance(e["employment"], e["self_employment"], rules, tax_scale)
+              if below_spa(who) and (e["employment"] or e["self_employment"]) else 0.0
+              for who, e in earnings.items()}
 
         def tax_for(who: str, income_: float) -> float:
             return income_tax(income_, rules, scot[who], tax_scale).total if income_ else 0.0
 
         ts = {who: {"taxable": taxable[who], "tax": tax_for(who, taxable[who])} for who in people}
-        tax_on_income = sum(t["tax"] for t in ts.values())
+        tax_on_income = sum(t["tax"] for t in ts.values()) + sum(ni.values())
         # CGT is worked out on each person's gains so far this year, on top of
         # their taxable income known at the time of each sale.
         gs = {who: {"gains": 0.0, "cgt": 0.0} for who in people}
@@ -338,7 +375,7 @@ def project(plan: Plan) -> Forecast:
         def cgt_parts(extra_gain: float, owner) -> dict[str, float]:
             out = {}
             for who, sh in shares(owner).items():
-                total = capital_gains_tax(gs[who]["gains"] + extra_gain * sh, ts[who]["taxable"], rules, tax_scale)
+                total = capital_gains_tax(gs[who]["gains"] + extra_gain * sh, ts[who]["taxable"], rules, tax_scale, aea_scale)
                 out[who] = max(0.0, total - gs[who]["cgt"])
             return out
 
@@ -385,8 +422,8 @@ def project(plan: Plan) -> Forecast:
             py = pys[pid]
             if want <= 0 or bal[pid] <= 0.005:
                 return 0.0
-            uk = pot.tax_mode == "uk" and pot.type == PotType.PENSION
-            if pot.tax_mode == "cgt" and pot.type != PotType.PENSION:
+            uk = pot.tax_mode == "uk" and pot.type == PotType.PENSION and not net_basis
+            if pot.tax_mode == "cgt" and pot.type != PotType.PENSION and not net_basis:
                 share = gain_share(pid)
                 gross = min(want, bal[pid])
                 if basis == "net":
@@ -515,12 +552,10 @@ def project(plan: Plan) -> Forecast:
                 bal[a.surplus_pot_id] += saved
                 pys[a.surplus_pot_id].surplus_saved += saved
 
-        # 7. Growth.
+        # 7. Growth (unless it was added on the opening balance).
+        if not growth_first:
+            grow()
         for pid in pots:
-            g = bal[pid] * _real(rates[pid], infl, method) * f
-            if bal[pid] + g != bal[pid]:
-                scale_pot(pid, bal[pid] + g)
-            pys[pid].growth = g
             pys[pid].closing = bal[pid]
             pys[pid].crystallised = cryst[pid]
             if bal[pid] <= 0.005:
@@ -530,13 +565,14 @@ def project(plan: Plan) -> Forecast:
         overdraft *= 1 + _real(a.overdraft_rate, infl, method) * f
 
         total_income_tax = sum(t["tax"] for t in ts.values())
-        flat_tax = sum(py.tax for py in pys.values()) - (total_income_tax - tax_on_income)
+        total_ni = sum(ni.values())
+        flat_tax = sum(py.tax for py in pys.values()) - (total_income_tax + total_ni - tax_on_income)
         breakdowns = {who: income_tax(t["taxable"], rules, scot[who], tax_scale) if t["taxable"] else None
                       for who, t in ts.items()}
         breakdown = breakdowns["client"]
         by_person = {who: {"name": people[who].name, "taxable_income": ts[who]["taxable"],
                            "income_tax": ts[who]["tax"], "capital_gains": gs[who]["gains"], "cgt": gs[who]["cgt"],
-                           "tax_free_cash": tfc_by[who],
+                           "tax_free_cash": tfc_by[who], "ni": ni[who],
                            "bands": breakdowns[who].bands if breakdowns[who] else []} for who in people}
         rows.append(
             YearRow(
@@ -552,7 +588,8 @@ def project(plan: Plan) -> Forecast:
                 surplus_deficit=surplus,
                 drawn_for_shortfall_net=drawn_net,
                 unfunded_shortfall=unfunded,
-                tax_paid=flat_tax + total_income_tax,
+                tax_paid=flat_tax + total_income_tax + total_ni,
+                national_insurance=total_ni,
                 overdraft=overdraft,
                 savings_end=sum(bal.values()) - overdraft,
                 income_tax=total_income_tax,

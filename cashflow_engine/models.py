@@ -271,6 +271,19 @@ class Assumptions:
     # How a nominal rate becomes a real one: "additive" (r - i, as Voyant does)
     # or "fisher" ((1 + r) / (1 + i) - 1).
     real_rate_method: str = "additive"
+    # True: the first year runs to the next birthday and is a part year (Voyant's
+    # original forecasts). False: every year is a whole year from the start date
+    # (Voyant's newer gross forecasts).
+    part_first_year: bool = True
+    # When growth is added each year: "after_flows" grows the balance left after
+    # contributions and withdrawals (Voyant's original forecasts); "on_opening"
+    # grows the opening balance, as if money moves at the end of the year
+    # (Voyant's newer gross forecasts).
+    growth_timing: str = "after_flows"
+    # "gross": income entered before tax, with UK income tax, National Insurance
+    # and CGT worked out. "net": income entered after tax and each account taxed
+    # at its flat rate (Voyant's net forecast). The report says which it is.
+    basis: str = "gross"
     # Assumed gross returns by attitude to risk: {"5": {"lower": .02, "central": .04, "upper": .06}}.
     # A copy is kept with each plan so a saved forecast keeps the returns it used.
     atr_returns: dict = field(default_factory=dict)
@@ -302,6 +315,24 @@ class Plan:
             if p.id == pot_id:
                 return p
         raise KeyError(f"No pot with id {pot_id!r}")
+
+
+# How each forecast basis is calculated, matching Voyant's two kinds of forecast:
+# its net forecasts run birthday to birthday with a part first year and money moving
+# before growth; its gross forecasts run whole years with growth on the opening balance.
+BASIS_SETTINGS = {
+    "net": {"basis": "net", "part_first_year": True, "growth_timing": "after_flows"},
+    "gross": {"basis": "gross", "part_first_year": False, "growth_timing": "on_opening"},
+}
+
+
+def apply_basis(assumptions: "Assumptions", basis: str) -> "Assumptions":
+    """Set a plan's forecast basis ("net" or "gross") and the year timing that goes with it."""
+    if basis not in BASIS_SETTINGS:
+        raise ValueError(f"Forecast basis must be net or gross, not {basis!r}")
+    for k, v in BASIS_SETTINGS[basis].items():
+        setattr(assumptions, k, v)
+    return assumptions
 
 
 def owner_role(owner: str | None, plan: "Plan") -> str:

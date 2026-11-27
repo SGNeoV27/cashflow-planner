@@ -123,6 +123,7 @@ def clients():
 def create_client(body: dict = Body(...)):
     """Create a client with a blank baseline plan."""
     from cashflow_engine import Assumptions, Person, Plan, Pot, PotType
+    from cashflow_engine.models import apply_basis
 
     dob = date.fromisoformat(body["date_of_birth"])
     defaults = store().get_defaults()
@@ -133,9 +134,11 @@ def create_client(body: dict = Body(...)):
         pots=[Pot("current", "Current account", PotType.CURRENT_ACCOUNT, 0,
                   growth_rate=defaults.current_account_return)],
         withdrawal_order=["current"],
-        assumptions=Assumptions(inflation=defaults.inflation, end_age=defaults.end_age,
-                                atr_returns=defaults.atr_returns_snapshot(), return_scenario=defaults.return_scenario,
-                                platforms=defaults.platforms_snapshot()),
+        assumptions=apply_basis(Assumptions(inflation=defaults.inflation, end_age=defaults.end_age,
+                                            atr_returns=defaults.atr_returns_snapshot(),
+                                            return_scenario=defaults.return_scenario,
+                                            platforms=defaults.platforms_snapshot()),
+                                body.get("basis") or defaults.default_basis),
     )
     cid = store().create_client(body["name"])
     store().save_plan(cid, plan, "Created")
@@ -240,7 +243,7 @@ def confirm_import(body: dict = Body(...)):
     try:
         plan = to_plan(ff, start_date=date.fromisoformat(body["start_date"]),
                        date_of_birth=date.fromisoformat(body["date_of_birth"]) if body.get("date_of_birth") else None,
-                       defaults=defaults, atr=body.get("atr"))
+                       defaults=defaults, atr=body.get("atr"), basis=body.get("basis"))
     except ValueError as e:
         raise HTTPException(400, str(e))
     warnings = [w for w in ff.warnings if not (body.get("date_of_birth") and "date of birth" in w)]
