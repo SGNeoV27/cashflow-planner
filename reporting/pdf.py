@@ -11,8 +11,7 @@ from io import BytesIO
 from pathlib import Path
 
 from reportlab.graphics.charts.barcharts import VerticalBarChart
-from reportlab.graphics.charts.legends import Legend
-from reportlab.graphics.shapes import STATE_DEFAULTS, Drawing, Polygon, String
+from reportlab.graphics.shapes import STATE_DEFAULTS, Drawing, Polygon, Rect, String
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_RIGHT
 from reportlab.lib.pagesizes import A4, landscape
@@ -191,11 +190,16 @@ def _age_labels(ages: list[int]) -> list[str]:
     return [str(a) if (a % 5 == 0 or i == 0) else "" for i, a in enumerate(ages)]
 
 
+LEGEND_COL = 125  # points per legend entry
+
+
 def _bar_chart(width, height, ages, series: list[tuple[str, list[float]]], title: str,
                markers: dict[int, str] | None = None) -> Drawing:
-    d = Drawing(width, height)
+    n_rows = -(-len(series) // max(1, int((width - 45) // LEGEND_COL))) if series else 1
+    extra = (n_rows - 1) * 11
+    d = Drawing(width, height + extra)
     chart = VerticalBarChart()
-    chart.x, chart.y = 45, 40
+    chart.x, chart.y = 45, 40 + extra
     chart.width, chart.height = width - 60, height - 75
     chart.data = [vals for _, vals in series] or [[0] * len(ages)]
     chart.categoryAxis.style = "stacked"
@@ -219,7 +223,7 @@ def _bar_chart(width, height, ages, series: list[tuple[str, list[float]]], title
         chart.bars[i].fillColor = SERIES[i % len(SERIES)]
         chart.bars[i].strokeColor = None
     d.add(chart)
-    d.add(String(45, height - 14, title, fontName="OpenSans-SemiBold", fontSize=9, fillColor=GREY))
+    d.add(String(45, height + extra - 14, title, fontName="OpenSans-SemiBold", fontSize=9, fillColor=GREY))
     if markers:
         # Mark the years with life events, so they show on the timeline.
         n = len(ages)
@@ -229,20 +233,15 @@ def _bar_chart(width, height, ages, series: list[tuple[str, list[float]]], title
                 x = chart.x + step * (i + 0.5)
                 top = chart.y + chart.height + 3
                 d.add(Polygon([x - 3, top + 5, x + 3, top + 5, x, top], fillColor=BURGUNDY, strokeColor=None))
-    legend = Legend()
-    legend.x, legend.y = 45, 10
-    legend.fontName, legend.fontSize = "OpenSans", 7
-    legend.alignment = "right"
-    legend.columnMaximum = 1
-    legend.dx = legend.dy = 6
-    legend.deltax = 10
-    legend.boxAnchor = "sw"
-    legend.colorNamePairs = [(SERIES[i % len(SERIES)], name) for i, (name, _) in enumerate(series)]
-    legend.dxTextSpace = 4
-    legend.deltax = max(60, (width - 60) / max(1, len(series)))
-    legend.x = 45
-    legend.y = 4
-    d.add(legend)
+    # The legend wraps onto as many rows as it needs, below the chart.
+    per_row = max(1, int((width - 45) // LEGEND_COL))
+    n_rows = -(-len(series) // per_row) if series else 1
+    for i, (name, _) in enumerate(series):
+        col, row = i % per_row, i // per_row
+        x, y = 45 + col * LEGEND_COL, 4 + (n_rows - 1 - row) * 11
+        d.add(Rect(x, y, 6, 6, fillColor=SERIES[i % len(SERIES)], strokeColor=None))
+        label = name if len(name) <= 30 else name[:29] + "…"
+        d.add(String(x + 10, y, label, fontName="OpenSans", fontSize=7, fillColor=colors.black))
     return d
 
 
@@ -452,6 +451,17 @@ def _tax(data: ReportData, st, width):
             f"{pct(data.plan.assumptions.tax_rules.cgt_basic_rate, 0)} within the unused basic rate band and "
             f"{pct(data.plan.assumptions.tax_rules.cgt_higher_rate, 0)} above it.", st["body"]))
     couple = data.plan.partner is not None
+    flat_by_row = [r.tax_paid - r.income_tax - r.cgt for r in f.rows]
+    flat_total = sum(flat_by_row)
+    if flat_total > 0.5:
+        flat_pots = [p for p in data.plan.pots if p.tax_mode == "flat" and p.tax_rate > 0]
+        rates = ", ".join(f"{p.name} {pct(p.tax_rate, 0)}" for p in flat_pots[:6]) + ("…" if len(flat_pots) > 6 else "")
+        out.append(Paragraph(
+            f"Some accounts are taxed at a flat rate on what is taken out instead of through the income tax "
+            f"bands ({rates}). Tax at these flat rates totals <b>{money(flat_total)}</b> over the plan. It is "
+            f"shown in the Flat-rate tax column below and included in the Tax column of the year-by-year "
+            f"cashflow.", st["body"]))
+    has_flat = flat_total > 0.5
     people = list(f.rows[0].tax_by_person) if f.rows else ["client"]
     names = {who: (f.rows[0].tax_by_person[who]["name"] if f.rows else who) for who in people}
     if couple:
@@ -482,7 +492,9 @@ def _tax(data: ReportData, st, width):
                  *[f"{n}'s tax" for n in first_names], "Tax-free cash"]]
     else:
         rows = [["Age", "Year", "Taxable income", "Income tax", "Tax-free cash", "Effective rate"]]
-    for r in f.rows:
+    if has_flat:
+        rows[0].insert(4 + (len(people) if couple else 0), "Flat-rate tax")
+    for n_row, r in enumerate(f.rows):
         if r.taxable_income <= 0 and r.tax_free_cash <= 0 and r.tax_paid <= 0:
             continue
         if couple:
@@ -492,14 +504,23 @@ def _tax(data: ReportData, st, width):
             eff = r.income_tax / r.taxable_income if r.taxable_income else 0.0
             rows.append([str(r.age), str(r.year), money(r.taxable_income), money(r.income_tax),
                          money(r.tax_free_cash), pct(eff, 1)])
+        if has_flat:
+            rows[-1].insert(4 + (len(people) if couple else 0), money(flat_by_row[n_row]))
     if len(rows) > 1:
         if couple:
             rows.append(["Total", "", money(sum(r.taxable_income for r in f.rows)), money(t["income_tax"]),
                          *[money(sum(r.tax_by_person[w]["income_tax"] for r in f.rows)) for w in people],
                          money(t["tax_free_cash"])])
-            widths = (0.08, 0.08, 0.18, 0.16, *([0.36 / len(people)] * len(people)), 0.14)
+            widths = [0.08, 0.08, 0.18, 0.16, *([0.36 / len(people)] * len(people)), 0.14]
         else:
-            widths = (0.1, 0.1, 0.22, 0.2, 0.2, 0.18)
+            rows.append(["Total", "", money(sum(r.taxable_income for r in f.rows)), money(t["income_tax"]),
+                         money(t["tax_free_cash"]), ""])
+            widths = [0.1, 0.1, 0.22, 0.2, 0.2, 0.18]
+        if has_flat:
+            at = 4 + (len(people) if couple else 0)
+            rows[-1].insert(at, money(flat_total))
+            widths.insert(at, 0.16)
+            widths = [w / sum(widths) for w in widths]
         out += [Paragraph("Tax year by year", st["h2"]),
                 _table(rows, [w * width for w in widths], st, right_from=0, total_row=True)]
     return out
@@ -529,7 +550,7 @@ YEAR_COLUMNS = [
     ("Life events", lambda r: money(r.event_costs)),
     ("Contri-butions", lambda r: money(r.total_contributions)),
     ("Charges", lambda r: money(r.total_charges)),
-    ("Income tax", lambda r: money(r.income_tax)),
+    ("Tax", lambda r: money(r.tax_paid)),
     ("Tax-free cash", lambda r: money(r.tax_free_cash)),
     ("Savings at end", lambda r: money(r.savings_end)),
 ]
