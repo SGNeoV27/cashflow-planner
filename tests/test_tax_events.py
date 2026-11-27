@@ -281,7 +281,8 @@ def test_cgt_uses_higher_rate_above_basic_band():
     r = row0(p)
     # £20,000 gain, £17,000 taxable; £5,000 of basic band left at 18%, the rest at 24%.
     assert r.cgt == pytest.approx(5_000 * 0.18 + 12_000 * 0.24)
-    assert r.tax_paid == pytest.approx(r.income_tax + r.cgt)
+    assert r.national_insurance == pytest.approx((45_270 - 12_570) * 0.08)
+    assert r.tax_paid == pytest.approx(r.income_tax + r.cgt + r.national_insurance)
 
 
 def test_cgt_net_withdrawal_grossed_up():

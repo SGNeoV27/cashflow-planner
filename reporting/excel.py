@@ -61,7 +61,9 @@ def render_xlsx(data: ReportData) -> bytes:
         ["End age", a.end_age], ["Inflation", a.inflation], ["Return scenario", a.return_scenario],
         ["Tax year", a.tax_rules.tax_year], ["Scottish taxpayer", "Yes" if p.client.scottish_taxpayer else "No"],
         ["Thresholds frozen until April", a.tax_rules.frozen_until],
-        ["Lump sum allowance", a.tax_rules.lump_sum_allowance]])
+        ["Lump sum allowance", a.tax_rules.lump_sum_allowance],
+        ["Forecast basis", data.basis_text],
+        ["First year", "Part year, to the next birthday" if getattr(a, "part_first_year", True) else "Whole year"]])
     ws = wb["Assumptions"]
     ws["B7"].number_format = PCT
     ws["B12"].number_format = MONEY
@@ -93,7 +95,7 @@ def render_xlsx(data: ReportData) -> bytes:
             ("Income (gross)", MONEY, 14), ("Scheduled withdrawals (net)", MONEY, 15),
             ("Drawn for spending (net)", MONEY, 15), ("Spending", MONEY, 13), ("Life events", MONEY, 13),
             ("Contributions", MONEY, 13), ("Charges", MONEY, 12), ("Taxable income", MONEY, 14),
-            ("Income tax", MONEY, 12), ("Capital gains", MONEY, 13), ("CGT", MONEY, 11), ("All tax", MONEY, 12), ("Tax-free cash", MONEY, 13),
+            ("Income tax", MONEY, 12), ("Capital gains", MONEY, 13), ("CGT", MONEY, 11), ("National Insurance", MONEY, 12), ("All tax", MONEY, 12), ("Tax-free cash", MONEY, 13),
             ("Surplus / deficit", MONEY, 14), ("Unfunded shortfall", MONEY, 14), ("Overdraft", MONEY, 12),
             ("Savings at end", MONEY, 15)]
     people = list(f.rows[0].tax_by_person) if (f.rows and p.partner) else []
@@ -105,7 +107,7 @@ def render_xlsx(data: ReportData) -> bytes:
     for r in f.rows:
         rows.append([r.year, r.age, r.fraction, r.savings_start, r.total_income, r.net_withdrawals,
                      r.drawn_for_shortfall_net, r.total_expenses - r.event_costs, r.event_costs,
-                     r.total_contributions, r.total_charges, r.taxable_income, r.income_tax, r.capital_gains, r.cgt, r.tax_paid,
+                     r.total_contributions, r.total_charges, r.taxable_income, r.income_tax, r.capital_gains, r.cgt, r.national_insurance, r.tax_paid,
                      r.tax_free_cash, r.surplus_deficit, r.unfunded_shortfall, r.overdraft, r.savings_end]
                     + [x for who in people for x in (r.tax_by_person[who]["taxable_income"],
                                                      r.tax_by_person[who]["income_tax"], r.tax_by_person[who]["cgt"])]

@@ -137,7 +137,8 @@ async function clientsView() {
           <div><label>Name</label><input name="name" required></div>
           <div><label>Date of birth</label><input type="date" name="date_of_birth" required></div>
           <div><label>Retirement age</label><input type="number" name="retirement_age"></div>
-        </div><p></p><button>Create</button></form></div>
+        </div><div class="row" style="margin-top:8px"><div><label>Forecast basis</label><select name="basis">${[["gross", "Gross: income before tax, UK tax worked out"], ["net", "Net: income after tax, flat tax rates"]].map(([v, l]) => `<option value="${v}" ${v === ((SETTINGS && SETTINGS.default_basis) || "gross") ? "selected" : ""}>${l}</option>`).join("")}</select></div></div>
+        <p></p><button>Create</button></form></div>
     </div></div>`;
   document.getElementById("imp").onclick = async () => {
     const f = document.getElementById("pdf").files[0];
@@ -181,7 +182,8 @@ function reviewView() {
       <div><label>Inflation %</label><input type="number" step="0.01" id="d_infl" value="${pct(d.inflation)}"></div>
       <div><label>Plan to age</label><input type="number" id="d_end" value="${d.end_age}"></div></div>
       <p class="muted" style="font-size:12px">Invested pots grow at the ATR's assumed return. Cash grows at ${pct(d.cash_return)}%. ${Object.entries(d.product_returns).map(([n, r]) => `${esc(n)} grow at ${pct(r)}%.`).join(" ")}</p>
-      <div class="row"><div><label>Return scenario</label><select id="d_sc">${["lower", "central", "upper"].map((x) => `<option ${x === d.return_scenario ? "selected" : ""} value="${x}">${label(x)}</option>`).join("")}</select></div></div>
+      <div class="row"><div><label>Forecast basis</label><select id="d_basis">${[["gross", "Gross: income before tax, UK tax worked out"], ["net", "Net: income after tax, flat tax rates"]].map(([v, l]) => `<option value="${v}" ${v === (d.default_basis || "gross") ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+      <div><label>Return scenario</label><select id="d_sc">${["lower", "central", "upper"].map((x) => `<option ${x === d.return_scenario ? "selected" : ""} value="${x}">${label(x)}</option>`).join("")}</select></div></div>
       <p class="muted" style="font-size:12px">Invested pots start with the default charges for their type (pensions ${pct((d.charges.pension || []).reduce((a, c) => a + c.rate, 0))}% a year). Pensions are taxed under ${d.pension_tax_mode === "uk" ? "UK income tax" : "a flat rate"}.</p></div>
   </div>
   <div class="grid2">
@@ -206,6 +208,7 @@ function reviewView() {
       return_scenario: document.getElementById("d_sc").value };
     try {
       const r = await api("/api/import/confirm", { body: { fact_find: ff, defaults, atr: +document.getElementById("d_atr").value,
+        basis: document.getElementById("d_basis").value,
         date_of_birth: document.getElementById("r_dob").value || null, start_date: document.getElementById("r_start").value } });
       sessionStorage.removeItem("review");
       location.hash = `#/client/${r.id}/plan/Baseline`;
@@ -369,6 +372,7 @@ async function planView(cid, name) {
           <div><label>Start date</label><input type="date" data-k="start_date"></div></div>
           <div class="row" style="margin-top:8px">
           <div><label>State Pension age</label><input type="number" data-k="client.state_pension_age" data-t="int?"></div>
+          <div><label>Forecast basis</label><select id="basisSel"><option value="gross">Gross (UK tax worked out)</option><option value="net">Net (income after tax)</option></select></div>
           <div><label>Return scenario</label><select data-k="assumptions.return_scenario" data-t="text"><option value="lower">Lower</option><option value="central">Central</option><option value="upper">Upper</option></select></div>
           <div><label><input type="checkbox" data-k="client.scottish_taxpayer" data-t="bool"> Scottish taxpayer</label>
             <span class="muted" style="font-size:12px">Tax year ${esc(plan.assumptions.tax_rules?.tax_year || "")}</span></div></div>
@@ -452,6 +456,16 @@ async function planView(cid, name) {
     if (rm) rm.onclick = () => { plan.partner = null; renderPartner(); renderTab(); refresh(); };
   }
   renderPartner();
+  const basisSel = document.getElementById("basisSel");
+  basisSel.value = plan.assumptions.basis || "gross";
+  basisSel.onchange = () => {
+    // Each basis comes with Voyant's year timing for that kind of forecast.
+    const gross = basisSel.value === "gross";
+    Object.assign(plan.assumptions, { basis: basisSel.value, part_first_year: !gross, growth_timing: gross ? "on_opening" : "after_flows" });
+    msg(gross ? "Gross forecast: incomes ticked 'Taxable' are now taxed, so check they are amounts before tax."
+              : "Net forecast: no income tax is worked out, so check incomes are take-home amounts.");
+    refresh();
+  };
   function bindFields() {
     document.querySelectorAll("[data-k]").forEach((el) => {
       const k = el.dataset.k, t = el.dataset.t;
@@ -799,7 +813,8 @@ async function settingsView() {
         <div class="panel"><h2>Pensions and State Pension</h2><div class="row">
           <div><label>Pension tax</label><select id="s_ptm"><option value="uk" ${d.pension_tax_mode === "uk" ? "selected" : ""}>UK income tax</option><option value="flat" ${d.pension_tax_mode === "flat" ? "selected" : ""}>Flat rate</option></select></div>
           <div><label>Default withdrawal method</label><select id="s_pwm">${Object.entries(METHODS).map(([k, l]) => `<option value="${k}" ${k === d.pension_withdrawal_method ? "selected" : ""}>${l}</option>`).join("")}</select></div>
-          <div><label>GIA tax</label><select id="s_gtm"><option value="cgt" ${d.gia_tax_mode === "cgt" ? "selected" : ""}>Capital Gains Tax</option><option value="flat" ${d.gia_tax_mode === "flat" ? "selected" : ""}>Flat rate</option></select></div></div>
+          <div><label>GIA tax</label><select id="s_gtm"><option value="cgt" ${d.gia_tax_mode === "cgt" ? "selected" : ""}>Capital Gains Tax</option><option value="flat" ${d.gia_tax_mode === "flat" ? "selected" : ""}>Flat rate</option></select></div>
+          <div><label>New forecasts are</label><select id="s_basis"><option value="gross" ${d.default_basis !== "net" ? "selected" : ""}>Gross (UK tax worked out)</option><option value="net" ${d.default_basis === "net" ? "selected" : ""}>Net (income after tax)</option></select></div></div>
           <div class="row" style="margin-top:8px"><div><label>Full new State Pension (£ a week)</label><input type="number" step="0.01" id="s_sp" value="${d.full_state_pension_weekly}"></div>
           <div><label>State Pension increase % (blank = inflation)</label><input type="number" step="0.01" id="s_spi" value="${d.state_pension_increase == null ? "" : pct(d.state_pension_increase)}"></div></div></div>
         <div class="panel"><h2>Model portfolios</h2>
@@ -838,6 +853,7 @@ async function settingsView() {
       const spi = document.getElementById("s_spi").value; d.state_pension_increase = spi === "" ? null : +spi / 100;
       d.default_platform = document.getElementById("s_defplat").value || null;
       d.initial_fee = num("#s_initfee"); d.ongoing_fee = num("#s_ongfee"); d.gia_tax_mode = document.getElementById("s_gtm").value;
+      d.default_basis = document.getElementById("s_basis").value;
       TYPES.forEach((t) => {
         const list = Object.keys(CHARGE_KINDS).filter((k) => k !== "fixed").map((k) => {
           if (FIRM_KINDS.includes(k)) return { kind: k, rate: d.ongoing_fee, amount: 0, name: null };

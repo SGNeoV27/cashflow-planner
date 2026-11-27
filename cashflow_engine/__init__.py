@@ -18,11 +18,11 @@ from .models import (
     PotType,
     Withdrawal,
 )
-from .tax import TaxRules, income_tax
+from .tax import TaxRules, income_tax, national_insurance
 from .scenarios import Scenario, long_term_care
 
 __all__ = [
-    "AtrReturn", "Platform", "PlatformSchedule", "default_platforms", "Assumptions", "Charge", "LifeEvent", "TaxRules", "income_tax", "Contribution", "FirmDefaults", "Portfolio", "Expense", "Forecast", "Frequency", "Income",
+    "AtrReturn", "Platform", "PlatformSchedule", "default_platforms", "Assumptions", "Charge", "LifeEvent", "TaxRules", "income_tax", "national_insurance", "Contribution", "FirmDefaults", "Portfolio", "Expense", "Forecast", "Frequency", "Income",
     "OneOffCharge", "Person", "Plan", "Pot", "PotType", "Scenario", "Withdrawal",
     "YearRow", "first_year_fraction", "long_term_care", "project",
 ]

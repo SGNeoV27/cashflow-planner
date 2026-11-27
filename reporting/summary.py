@@ -90,13 +90,29 @@ class ReportData:
     def age_now(self) -> int:
         return age_on(self.plan.client.date_of_birth, self.plan.start_date)
 
+    @property
+    def is_net(self) -> bool:
+        return getattr(self.plan.assumptions, "basis", "gross") == "net"
+
+    @property
+    def basis_label(self) -> str:
+        return "Net forecast" if self.is_net else "Gross forecast"
+
+    @property
+    def basis_text(self) -> str:
+        if self.is_net:
+            return ("Net: incomes are shown after tax, as you receive them, and money taken from each account "
+                    "is taxed at that account's flat rate. Income tax and National Insurance are not worked out.")
+        return ("Gross: incomes are shown before tax, and income tax, National Insurance and Capital Gains Tax "
+                "are worked out each year under the UK rules described below.")
+
     def key_figures(self) -> list[tuple[str, str]]:
         f, t = self.forecast, self.forecast.totals()
         run_out = f.assets_depletion_age()
         ret = self.plan.client.retirement_age
         at_ret = ([(f"Savings at retirement (age {ret})", money(f.savings_at_age(ret)))]
                   if ret and self.age_now < ret <= f.final_age else [])
-        flat = t["tax"] - t["income_tax"] - t["cgt"]
+        flat = t["tax"] - t["income_tax"] - t["cgt"] - t["ni"]
         return [
             ("Savings and investments today", money(sum(p.value for p in self.plan.pots))),
             *at_ret,
@@ -104,6 +120,7 @@ class ReportData:
             ("Money lasts", "Throughout the plan" if run_out is None else f"Runs out at age {run_out}"),
             ("Total income tax", money(t["income_tax"])),
             *([("Total Capital Gains Tax", money(t["cgt"]))] if t["cgt"] else []),
+            *([("Total National Insurance", money(t["ni"]))] if t["ni"] > 0.5 else []),
             *([("Tax at flat rates on withdrawals", money(flat))] if flat > 0.5 else []),
             ("Total tax-free cash taken", money(t["tax_free_cash"])),
             ("Total charges", money(t["charges"])),

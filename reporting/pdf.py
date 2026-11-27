@@ -252,6 +252,7 @@ def _cover(data: ReportData, st, width):
            Paragraph("Financial Forecast", st["cover_title"]),
            Paragraph(f"Prepared for {c.name}", st["cover"]),
            Paragraph(f"Plan: {data.plan.name}", st["cover"]),
+           Paragraph(data.basis_label, st["cover"]),
            Paragraph(f"Prepared {data.prepared.day} {data.prepared:%B %Y}", st["cover"]),
            Spacer(1, 45 * mm),
            Paragraph(f"{FIRM}. This report is an illustration based on the assumptions shown inside. "
@@ -280,7 +281,10 @@ def _assumptions(data: ReportData, st, width):
     rules = a.tax_rules
     rows = [["Assumption", "Value"],
             ["Client", f"{c.name}, born {c.date_of_birth.day} {c.date_of_birth:%B %Y} (age {data.age_now})"],
-            ["Plan runs", f"From {p.start_date.day} {p.start_date:%b %Y} to age {a.end_age}"],
+            ["Forecast basis", data.basis_text],
+            ["Plan runs", f"From {p.start_date.day} {p.start_date:%b %Y} to age {a.end_age}"
+                          + ("; the first year runs to your next birthday" if getattr(a, "part_first_year", True)
+                             else "; each year is a whole year from the start date")],
             ["Inflation", pct(a.inflation, 1) + " a year"],
             ["Investment return scenario", a.return_scenario.capitalize()],
             ["Income tax", f"{rules.tax_year} rules, {'Scottish' if c.scottish_taxpayer else 'rest of UK'} rates; "
@@ -443,6 +447,10 @@ def _tax(data: ReportData, st, width):
                      f"from pensions totals <b>{money(t['tax_free_cash'])}</b>. Tax is worked out on all of a person's "
                      f"taxable income together, including salary, State Pension, other pensions and rent, so pension "
                      f"withdrawals can fall into a higher band when other income is high.", st["body"])]
+    if t["ni"] > 0.5:
+        out.append(Paragraph(
+            f"National Insurance on earnings totals <b>{money(t['ni'])}</b>. It is paid on salary and "
+            f"self-employed profits until State Pension age.", st["body"]))
     if t["cgt"]:
         out.append(Paragraph(
             f"Selling investments in general investment accounts realises gains totalling "
@@ -451,7 +459,7 @@ def _tax(data: ReportData, st, width):
             f"{pct(data.plan.assumptions.tax_rules.cgt_basic_rate, 0)} within the unused basic rate band and "
             f"{pct(data.plan.assumptions.tax_rules.cgt_higher_rate, 0)} above it.", st["body"]))
     couple = data.plan.partner is not None
-    flat_by_row = [r.tax_paid - r.income_tax - r.cgt for r in f.rows]
+    flat_by_row = [r.tax_paid - r.income_tax - r.cgt - r.national_insurance for r in f.rows]
     flat_total = sum(flat_by_row)
     if flat_total > 0.5:
         flat_pots = [p for p in data.plan.pots if p.tax_mode == "flat" and p.tax_rate > 0]
